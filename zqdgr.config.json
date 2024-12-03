@@ -1,0 +1,15 @@
+{
+    "name": "Go Project",
+    "version": "0.0.1",
+    "description": "Example description",
+    "author": "you",
+    "license": "BSL-1.0",
+    "scripts": {
+        "build:daemon": "go build -o fluxd cmd/daemon/main.go",
+        "build:cli": "go build -o flux cmd/cli/main.go",
+        "run:daemon": "go run cmd/daemon/main.go",
+        "run:cli": "go run cmd/cli/main.go"
+    },
+    "pattern": "**/*.go",
+    "excluded_dirs": []
+}
