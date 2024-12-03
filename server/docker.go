@@ -32,6 +32,8 @@ func NewContainerManager() *ContainerManager {
 }
 
 func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, containerPrefix, projectPath string, projectConfig ProjectConfig) (string, error) {
+	log.Printf("Deploying container with image %s\n", imageName)
+
 	containerName := fmt.Sprintf("%s-%s", containerPrefix, time.Now().Format("20060102-150405"))
 
 	existingContainers, err := cm.findExistingContainers(ctx, containerPrefix)
@@ -41,7 +43,7 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 
 	// TODO: swap containers if they are running and have the same image so that we can have a constant uptime
 	for _, existingContainer := range existingContainers {
-		log.Printf("Stopping existing container: %s", existingContainer)
+		log.Printf("Stopping existing container: %s\n", existingContainer)
 
 		if err := cm.dockerClient.ContainerStop(ctx, existingContainer, container.StopOptions{}); err != nil {
 			return "", fmt.Errorf("Failed to stop existing container: %v", err)
@@ -69,6 +71,7 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 		}
 	}
 
+	log.Printf("Creating and starting container %s...\n", containerName)
 	resp, err := cm.dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
@@ -98,7 +101,7 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 		return "", fmt.Errorf("Failed to start container: %v", err)
 	}
 
-	log.Printf("Deployed new container: %s", containerName)
+	log.Printf("Deployed new container: %s\n", containerName)
 	return resp.ID, nil
 }
 
