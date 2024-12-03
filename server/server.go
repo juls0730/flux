@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/juls0730/fluxd/models"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -29,21 +30,27 @@ type FluxServer struct {
 	containerManager *ContainerManager
 	config           FluxServerConfig
 	db               *sql.DB
+	rootDir          string
 }
 
-var rootDir string
+// var rootDir string
 
-func init() {
-	rootDir = os.Getenv("FLUXD_ROOT_DIR")
-	if rootDir == "" {
-		rootDir = "/var/fluxd"
-	}
-}
+// func init() {
+// 	rootDir = os.Getenv("FLUXD_ROOT_DIR")
+// 	if rootDir == "" {
+// 		rootDir = "/var/fluxd"
+// 	}
+// }
 
 func NewServer() *FluxServer {
 	containerManager := NewContainerManager()
 
 	var serverConfig FluxServerConfig
+
+	rootDir := os.Getenv("FLUXD_ROOT_DIR")
+	if rootDir == "" {
+		rootDir = "/var/fluxd"
+	}
 
 	// parse config, if it doesnt exist, create it and use the default config
 	configPath := filepath.Join(rootDir, "config.json")
@@ -96,11 +103,12 @@ func NewServer() *FluxServer {
 		containerManager: containerManager,
 		config:           serverConfig,
 		db:               db,
+		rootDir:          rootDir,
 	}
 }
 
-func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig ProjectConfig) (string, error) {
-	projectPath := filepath.Join(rootDir, "apps", projectConfig.Name)
+func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig models.ProjectConfig) (string, error) {
+	projectPath := filepath.Join(s.rootDir, "apps", projectConfig.Name)
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		log.Printf("Failed to create project directory: %v\n", err)
 		return "", err

@@ -12,9 +12,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/briandowns/spinner"
+	"github.com/juls0730/fluxd/models"
 )
 
 //go:embed config.json
@@ -202,6 +204,87 @@ func main() {
 
 		loadingSpinner.Stop()
 		fmt.Println("Deployed successfully!")
+	case "delete":
+		var projectName string
+
+		if len(os.Args) < 3 {
+			if _, err := os.Stat("flux.json"); err != nil {
+				fmt.Printf("Usage: flux delete <app name>, or run flux delete in the project directory\n")
+				os.Exit(1)
+			}
+
+			fluxConfigFile, err := os.Open("flux.json")
+			if err != nil {
+				fmt.Printf("Failed to open flux.json: %v\n", err)
+				os.Exit(1)
+			}
+			defer fluxConfigFile.Close()
+
+			var config models.ProjectConfig
+			if err := json.NewDecoder(fluxConfigFile).Decode(&config); err != nil {
+				fmt.Printf("Failed to decode flux.json: %v\n", err)
+				os.Exit(1)
+			}
+
+			projectName = config.Name
+		} else {
+			projectName = os.Args[2]
+		}
+
+		// ask for confirmation
+		fmt.Printf("Are you sure you want to delete %s? this will delete all volumes and containers associated with the deployment, and cannot be undone. \n[y/N]", projectName)
+		var response string
+		fmt.Scanln(&response)
+
+		if strings.ToLower(response) != "y" {
+			fmt.Println("Aborting...")
+			os.Exit(0)
+		}
+
+		req, err := http.NewRequest("DELETE", config.DeamonURL+"/deploy/"+projectName, nil)
+		if err != nil {
+			fmt.Printf("Failed to delete app: %v\n", err)
+			os.Exit(1)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Printf("Failed to delete app: %v\n", err)
+			os.Exit(1)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			responseBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				fmt.Printf("error reading response body: %v\n", err)
+				os.Exit(1)
+			}
+
+			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
+				responseBody = responseBody[:len(responseBody)-1]
+			}
+
+			fmt.Printf("Delete failed: %s\n", responseBody)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Successfully deleted %s\n", projectName)
+	case "list":
+		resp, err := http.Get(config.DeamonURL + "/apps")
+		if err != nil {
+			fmt.Printf("Failed to get apps: %v\n", err)
+			os.Exit(1)
+		}
+
+		var apps []models.App
+		if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
+			fmt.Printf("Failed to decode apps: %v\n", err)
+			os.Exit(1)
+		}
+
+		for _, app := range apps {
+			fmt.Printf("%s\n", app.Name)
+		}
 	default:
 		fmt.Println("Unknown command:", command)
 	}

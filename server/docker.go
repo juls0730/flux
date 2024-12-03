@@ -11,9 +11,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/joho/godotenv"
+	"github.com/juls0730/fluxd/models"
 )
 
 type ContainerManager struct {
@@ -31,7 +34,7 @@ func NewContainerManager() *ContainerManager {
 	}
 }
 
-func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, containerPrefix, projectPath string, projectConfig ProjectConfig) (string, error) {
+func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, containerPrefix, projectPath string, projectConfig models.ProjectConfig) (string, error) {
 	log.Printf("Deploying container with image %s\n", imageName)
 
 	containerName := fmt.Sprintf("%s-%s", containerPrefix, time.Now().Format("20060102-150405"))
@@ -45,12 +48,9 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 	for _, existingContainer := range existingContainers {
 		log.Printf("Stopping existing container: %s\n", existingContainer)
 
-		if err := cm.dockerClient.ContainerStop(ctx, existingContainer, container.StopOptions{}); err != nil {
-			return "", fmt.Errorf("Failed to stop existing container: %v", err)
-		}
-
-		if err := cm.dockerClient.ContainerRemove(ctx, existingContainer, container.RemoveOptions{}); err != nil {
-			return "", fmt.Errorf("Failed to remove existing container: %v", err)
+		err = cm.RemoveContainer(ctx, existingContainer)
+		if err != nil {
+			return "", err
 		}
 	}
 
@@ -71,12 +71,26 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 		}
 	}
 
+	vol, err := cm.dockerClient.VolumeCreate(ctx, volume.CreateOptions{
+		Driver:     "local",
+		DriverOpts: map[string]string{},
+		Name:       fmt.Sprintf("%s-volume", containerPrefix),
+	})
+	if err != nil {
+		return "", fmt.Errorf("Failed to create volume: %v", err)
+	}
+
+	log.Printf("Volume %s created at %s\n", vol.Name, vol.Mountpoint)
+
 	log.Printf("Creating and starting container %s...\n", containerName)
 	resp, err := cm.dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
 		ExposedPorts: nat.PortSet{
 			nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): {},
+		},
+		Volumes: map[string]struct{}{
+			vol.Name: {},
 		},
 	},
 		&container.HostConfig{
@@ -86,6 +100,14 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 						HostIP:   "0.0.0.0",
 						HostPort: strconv.Itoa(projectConfig.Port),
 					},
+				},
+			},
+			Mounts: []mount.Mount{
+				{
+					Type:     mount.TypeVolume,
+					Source:   vol.Name,
+					Target:   "/workspace",
+					ReadOnly: false,
 				},
 			},
 		},
@@ -103,6 +125,27 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 
 	log.Printf("Deployed new container: %s\n", containerName)
 	return resp.ID, nil
+}
+
+// RemoveContainer stops and removes a container, but be warned that this will not remove the container from the database
+func (cm *ContainerManager) RemoveContainer(ctx context.Context, containerID string) error {
+	if err := cm.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+		return fmt.Errorf("Failed to stop existing container: %v", err)
+	}
+
+	if err := cm.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
+		return fmt.Errorf("Failed to remove existing container: %v", err)
+	}
+
+	return nil
+}
+
+func (cm *ContainerManager) RemoveVolume(ctx context.Context, volumeID string) error {
+	if err := cm.dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
+		return fmt.Errorf("Failed to remove existing volume: %v", err)
+	}
+
+	return nil
 }
 
 func (cm *ContainerManager) findExistingContainers(ctx context.Context, containerPrefix string) ([]string, error) {
