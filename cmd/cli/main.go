@@ -204,6 +204,106 @@ func main() {
 
 		loadingSpinner.Stop()
 		fmt.Println("Deployed successfully!")
+	case "stop":
+		var projectName string
+
+		if len(os.Args) < 3 {
+			if _, err := os.Stat("flux.json"); err != nil {
+				fmt.Printf("Usage: flux delete <app name>, or run flux delete in the project directory\n")
+				os.Exit(1)
+			}
+
+			fluxConfigFile, err := os.Open("flux.json")
+			if err != nil {
+				fmt.Printf("Failed to open flux.json: %v\n", err)
+				os.Exit(1)
+			}
+			defer fluxConfigFile.Close()
+
+			var config models.ProjectConfig
+			if err := json.NewDecoder(fluxConfigFile).Decode(&config); err != nil {
+				fmt.Printf("Failed to decode flux.json: %v\n", err)
+				os.Exit(1)
+			}
+
+			projectName = config.Name
+		} else {
+			projectName = os.Args[2]
+		}
+
+		req, err := http.Post(config.DeamonURL+"/stop/"+projectName, "application/json", nil)
+		if err != nil {
+			fmt.Printf("Failed to stop app: %v\n", err)
+			os.Exit(1)
+		}
+		defer req.Body.Close()
+
+		if req.StatusCode != http.StatusOK {
+			responseBody, err := io.ReadAll(req.Body)
+			if err != nil {
+				fmt.Printf("error reading response body: %v\n", err)
+				os.Exit(1)
+			}
+
+			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
+				responseBody = responseBody[:len(responseBody)-1]
+			}
+
+			fmt.Printf("Stop failed: %s\n", responseBody)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Successfully stopped %s\n", projectName)
+	case "start":
+		var projectName string
+
+		if len(os.Args) < 3 {
+			if _, err := os.Stat("flux.json"); err != nil {
+				fmt.Printf("Usage: flux delete <app name>, or run flux delete in the project directory\n")
+				os.Exit(1)
+			}
+
+			fluxConfigFile, err := os.Open("flux.json")
+			if err != nil {
+				fmt.Printf("Failed to open flux.json: %v\n", err)
+				os.Exit(1)
+			}
+			defer fluxConfigFile.Close()
+
+			var config models.ProjectConfig
+			if err := json.NewDecoder(fluxConfigFile).Decode(&config); err != nil {
+				fmt.Printf("Failed to decode flux.json: %v\n", err)
+				os.Exit(1)
+			}
+
+			projectName = config.Name
+		} else {
+			projectName = os.Args[2]
+		}
+
+		req, err := http.Post(config.DeamonURL+"/start/"+projectName, "application/json", nil)
+		if err != nil {
+			fmt.Printf("Failed to start app: %v\n", err)
+			os.Exit(1)
+		}
+		defer req.Body.Close()
+
+		if req.StatusCode != http.StatusOK {
+			responseBody, err := io.ReadAll(req.Body)
+			if err != nil {
+				fmt.Printf("error reading response body: %v\n", err)
+				os.Exit(1)
+			}
+
+			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
+				responseBody = responseBody[:len(responseBody)-1]
+			}
+
+			fmt.Printf("Start failed: %s\n", responseBody)
+			os.Exit(1)
+		}
+
+		fmt.Printf("Successfully started %s\n", projectName)
 	case "delete":
 		var projectName string
 
@@ -282,8 +382,13 @@ func main() {
 			os.Exit(1)
 		}
 
+		if len(apps) == 0 {
+			fmt.Println("No apps found")
+			os.Exit(0)
+		}
+
 		for _, app := range apps {
-			fmt.Printf("%s\n", app.Name)
+			fmt.Printf("%s (%s)\n", app.Name, app.DeploymentStatus)
 		}
 	default:
 		fmt.Println("Unknown command:", command)

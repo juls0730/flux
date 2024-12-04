@@ -12,6 +12,8 @@ func main() {
 
 	http.HandleFunc("POST /deploy", fluxServer.DeployHandler)
 	http.HandleFunc("DELETE /deploy/{name}", fluxServer.DeleteDeployHandler)
+	http.HandleFunc("POST /start/{name}", fluxServer.StartDeployHandler)
+	http.HandleFunc("POST /stop/{name}", fluxServer.StopDeployHandler)
 	http.HandleFunc("GET /apps", fluxServer.ListAppsHandler)
 
 	log.Printf("Fluxd started on http://127.0.0.1:5647\n")

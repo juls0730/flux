@@ -13,7 +13,6 @@ CREATE TABLE IF NOT EXISTS containers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     container_id TEXT NOT NULL,
     deployment_id INTEGER NOT NULL,
-    status TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(deployment_id) REFERENCES deployments(id)
 );

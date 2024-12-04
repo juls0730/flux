@@ -34,25 +34,10 @@ func NewContainerManager() *ContainerManager {
 	}
 }
 
-func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, containerPrefix, projectPath string, projectConfig models.ProjectConfig) (string, error) {
+func (cm *ContainerManager) CreateContainer(ctx context.Context, imageName, projectPath string, projectConfig models.ProjectConfig) (string, error) {
 	log.Printf("Deploying container with image %s\n", imageName)
 
-	containerName := fmt.Sprintf("%s-%s", containerPrefix, time.Now().Format("20060102-150405"))
-
-	existingContainers, err := cm.findExistingContainers(ctx, containerPrefix)
-	if err != nil {
-		return "", fmt.Errorf("Failed to find existing containers: %v", err)
-	}
-
-	// TODO: swap containers if they are running and have the same image so that we can have a constant uptime
-	for _, existingContainer := range existingContainers {
-		log.Printf("Stopping existing container: %s\n", existingContainer)
-
-		err = cm.RemoveContainer(ctx, existingContainer)
-		if err != nil {
-			return "", err
-		}
-	}
+	containerName := fmt.Sprintf("%s-%s", projectConfig.Name, time.Now().Format("20060102-150405"))
 
 	if projectConfig.EnvFile != "" {
 		envBytes, err := os.Open(filepath.Join(projectPath, projectConfig.EnvFile))
@@ -74,7 +59,7 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 	vol, err := cm.dockerClient.VolumeCreate(ctx, volume.CreateOptions{
 		Driver:     "local",
 		DriverOpts: map[string]string{},
-		Name:       fmt.Sprintf("%s-volume", containerPrefix),
+		Name:       fmt.Sprintf("%s-volume", projectConfig.Name),
 	})
 	if err != nil {
 		return "", fmt.Errorf("Failed to create volume: %v", err)
@@ -82,7 +67,7 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 
 	log.Printf("Volume %s created at %s\n", vol.Name, vol.Mountpoint)
 
-	log.Printf("Creating and starting container %s...\n", containerName)
+	log.Printf("Creating container %s...\n", containerName)
 	resp, err := cm.dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
@@ -119,12 +104,16 @@ func (cm *ContainerManager) DeployContainer(ctx context.Context, imageName, cont
 		return "", fmt.Errorf("Failed to create container: %v", err)
 	}
 
-	if err := cm.dockerClient.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		return "", fmt.Errorf("Failed to start container: %v", err)
-	}
-
-	log.Printf("Deployed new container: %s\n", containerName)
+	log.Printf("Created new container: %s\n", containerName)
 	return resp.ID, nil
+}
+
+func (cm *ContainerManager) StartContainer(ctx context.Context, containerID string) error {
+	return cm.dockerClient.ContainerStart(ctx, containerID, container.StartOptions{})
+}
+
+func (cm *ContainerManager) StopContainer(ctx context.Context, containerID string) error {
+	return cm.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{})
 }
 
 // RemoveContainer stops and removes a container, but be warned that this will not remove the container from the database
