@@ -9,6 +9,6 @@ type Containers struct {
 
 type Deployments struct {
 	ID        int64  `json:"id"`
-	URLs      string `json:"urls"`
+	URL       string `json:"url"`
 	CreatedAt string `json:"created_at"`
 }

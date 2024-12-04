@@ -56,8 +56,8 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if projectConfig.Urls == nil || len(projectConfig.Urls) == 0 {
-		http.Error(w, "No deployment urls specified", http.StatusBadRequest)
+	if projectConfig.Url == "" {
+		http.Error(w, "No deployment url specified", http.StatusBadRequest)
 		return
 	}
 
@@ -66,7 +66,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Deploying project %s to %s\n", projectConfig.Name, projectConfig.Urls)
+	log.Printf("Deploying project %s to %s\n", projectConfig.Name, projectConfig.Url)
 
 	projectPath, err := s.UploadAppCode(deployRequest.Code, projectConfig)
 	if err != nil {
@@ -97,7 +97,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var app models.App
-	s.db.QueryRow("SELECT id FROM apps WHERE name = ?", projectConfig.Name).Scan(&app.ID)
+	s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE name = ?", projectConfig.Name).Scan(&app.ID, &app.Name, &app.DeploymentID)
 
 	if app.ID == 0 {
 		configBytes, err := json.Marshal(projectConfig)
@@ -137,20 +137,31 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE id = ?", appID).Scan(&app.ID, &app.Name, &app.DeploymentID)
+
+		err = s.StartDeployment(r.Context(), app.DeploymentID)
+		if err != nil {
+			log.Printf("Failed to start deployment: %v\n", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	} else {
+		// if deploy is not started, start it
+		deploymentStatus, err := s.GetDeploymentStatus(r.Context(), app.DeploymentID)
+		if deploymentStatus != "started" || err != nil {
+			err = s.StartDeployment(r.Context(), app.DeploymentID)
+			if err != nil {
+				log.Printf("Failed to start deployment: %v\n", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
 		err = s.UpgradeDeployment(r.Context(), app.DeploymentID, projectConfig, imageName, projectPath)
 		if err != nil {
 			log.Printf("Failed to upgrade deployment: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	}
-
-	err = s.StartDeployment(r.Context(), app.DeploymentID)
-	if err != nil {
-		log.Printf("Failed to start deployment: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
 
 	log.Printf("App %s deployed successfully!\n", app.Name)

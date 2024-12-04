@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -14,7 +14,6 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 	"github.com/joho/godotenv"
 	"github.com/juls0730/fluxd/models"
 )
@@ -71,22 +70,22 @@ func (cm *ContainerManager) CreateContainer(ctx context.Context, imageName, proj
 	resp, err := cm.dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
-		ExposedPorts: nat.PortSet{
-			nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): {},
-		},
+		// ExposedPorts: nat.PortSet{
+		// 	nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): {},
+		// },
 		Volumes: map[string]struct{}{
 			vol.Name: {},
 		},
 	},
 		&container.HostConfig{
-			PortBindings: nat.PortMap{
-				nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): []nat.PortBinding{
-					{
-						HostIP:   "0.0.0.0",
-						HostPort: strconv.Itoa(projectConfig.Port),
-					},
-				},
-			},
+			// PortBindings: nat.PortMap{
+			// 	nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): []nat.PortBinding{
+			// 		{
+			// 			HostIP:   "0.0.0.0",
+			// 			HostPort: strconv.Itoa(projectConfig.Port),
+			// 		},
+			// 	},
+			// },
 			Mounts: []mount.Mount{
 				{
 					Type:     mount.TypeVolume,
@@ -129,6 +128,64 @@ func (cm *ContainerManager) RemoveContainer(ctx context.Context, containerID str
 	return nil
 }
 
+func (cm *ContainerManager) WaitForContainer(ctx context.Context, containerID string, containerPort int) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("container failed to become ready in time")
+
+		default:
+			containerJSON, err := cm.dockerClient.ContainerInspect(ctx, containerID)
+			if err != nil {
+				return err
+			}
+
+			if containerJSON.State.Running {
+				resp, err := http.Get(fmt.Sprintf("http://%s:%d/", containerJSON.NetworkSettings.IPAddress, containerPort))
+				if err == nil && resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+
+			time.Sleep(time.Second)
+		}
+	}
+}
+
+func (cm *ContainerManager) GracefullyRemoveContainer(ctx context.Context, containerID string) error {
+	timeout := 30
+	err := cm.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{
+		Timeout: &timeout,
+	})
+	if err != nil {
+		return fmt.Errorf("Failed to stop container: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	defer cancel()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return cm.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
+		default:
+			containerJSON, err := cm.dockerClient.ContainerInspect(ctx, containerID)
+			if err != nil {
+				return err
+			}
+
+			if !containerJSON.State.Running {
+				return cm.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
+			}
+
+			time.Sleep(time.Second)
+		}
+	}
+}
+
 func (cm *ContainerManager) RemoveVolume(ctx context.Context, volumeID string) error {
 	if err := cm.dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
 		return fmt.Errorf("Failed to remove existing volume: %v", err)
@@ -147,7 +204,7 @@ func (cm *ContainerManager) findExistingContainers(ctx context.Context, containe
 
 	var existingContainers []string
 	for _, container := range containers {
-		if strings.HasPrefix(container.Names[0], fmt.Sprintf("/%s", containerPrefix)) {
+		if strings.HasPrefix(container.Names[0], fmt.Sprintf("/%s-", containerPrefix)) {
 			existingContainers = append(existingContainers, container.ID)
 		}
 	}

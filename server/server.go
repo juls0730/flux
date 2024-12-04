@@ -30,6 +30,7 @@ type FluxServer struct {
 	containerManager *ContainerManager
 	config           FluxServerConfig
 	db               *sql.DB
+	Proxy            *ContainerProxy
 	rootDir          string
 }
 
@@ -103,7 +104,12 @@ func NewServer() *FluxServer {
 		containerManager: containerManager,
 		config:           serverConfig,
 		db:               db,
-		rootDir:          rootDir,
+		Proxy: &ContainerProxy{
+			urlMap: make(map[string]*containerRoute),
+			db:     db,
+			cm:     containerManager,
+		},
+		rootDir: rootDir,
 	}
 }
 

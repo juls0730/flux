@@ -1,11 +1,11 @@
 package models
 
 type ProjectConfig struct {
-	Name        string   `json:"name"`
-	Urls        []string `json:"urls"`
-	Port        int      `json:"port"`
-	EnvFile     string   `json:"env_file"`
-	Environment []string `json:"environment"`
+	Name        string   `json:"name,omitempty"`
+	Url         string   `json:"url,omitempty"`
+	Port        int      `json:"port,omitempty"`
+	EnvFile     string   `json:"env_file,omitempty"`
+	Environment []string `json:"environment,omitempty"`
 }
 
 type App struct {

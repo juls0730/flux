@@ -10,6 +10,8 @@ import (
 func main() {
 	fluxServer := server.NewServer()
 
+	go fluxServer.Proxy.Start()
+
 	http.HandleFunc("POST /deploy", fluxServer.DeployHandler)
 	http.HandleFunc("DELETE /deploy/{name}", fluxServer.DeleteDeployHandler)
 	http.HandleFunc("POST /start/{name}", fluxServer.StartDeployHandler)

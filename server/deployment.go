@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
 
 	"github.com/juls0730/fluxd/models"
 )
 
 // Creates a deployment and containers in the database
 func (s *FluxServer) CreateDeployment(ctx context.Context, projectConfig models.ProjectConfig, containerID string) (int64, error) {
-	deploymentResult, err := s.db.Exec("INSERT INTO deployments (urls) VALUES (?)", strings.Join(projectConfig.Urls, ","))
+	deploymentResult, err := s.db.Exec("INSERT INTO deployments (url) VALUES (?)", projectConfig.Url)
 	if err != nil {
 		log.Printf("Failed to insert deployment: %v\n", err)
 		return 0, err
@@ -45,38 +44,56 @@ func (s *FluxServer) UpgradeDeployment(ctx context.Context, deploymentID int64, 
 		return fmt.Errorf("Failed to find existing containers: %v", err)
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
-		return err
-	}
-	// TODO: swap containers if they are running and have the same image so that we can have a constant uptime
-	for _, existingContainer := range existingContainers {
-		log.Printf("Stopping existing container: %s\n", existingContainer[0:12])
+	fmt.Printf("There are %d existing containers\n", len(existingContainers))
 
-		tx.Exec("DELETE FROM containers WHERE container_id = ?", existingContainer)
-		err = s.containerManager.RemoveContainer(ctx, existingContainer)
-		if err != nil {
-			return err
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
-		return err
-	}
-
+	// Deploy new container before deleting old one
 	containerID, err := s.containerManager.CreateContainer(ctx, imageName, projectPath, projectConfig)
 	if err != nil {
 		log.Printf("Failed to create container: %v\n", err)
 		return err
 	}
 
+	err = s.containerManager.StartContainer(ctx, containerID)
+	if err != nil {
+		log.Printf("Failed to start container: %v\n", err)
+		return err
+	}
+
+	if err := s.containerManager.WaitForContainer(ctx, containerID, projectConfig.Port); err != nil {
+		log.Printf("Failed to wait for container: %v\n", err)
+		return err
+	}
+
+	s.Proxy.AddContainer(projectConfig, containerID)
+
 	s.db.Exec("INSERT INTO containers (container_id, deployment_id) VALUES (?, ?)", containerID, deploymentID)
 
 	// update app in the database
 	if _, err := s.db.Exec("UPDATE apps SET project_config = ?, deployment_id = ? WHERE name = ?", configBytes, deploymentID, projectConfig.Name); err != nil {
 		log.Printf("Failed to update app: %v\n", err)
+		return err
+	}
+
+	// TODO: swap containers if they are running and have the same image so that we can have a constant uptime
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("Failed to begin transaction: %v\n", err)
+		return err
+	}
+
+	for _, existingContainer := range existingContainers {
+		log.Printf("Stopping existing container: %s\n", existingContainer[0:12])
+
+		tx.Exec("DELETE FROM containers WHERE container_id = ?", existingContainer)
+		err = s.containerManager.GracefullyRemoveContainer(ctx, existingContainer)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit transaction: %v\n", err)
 		return err
 	}
 
@@ -102,8 +119,19 @@ func (s *FluxServer) StartDeployment(ctx context.Context, deploymentID int64) er
 		containerIds = append(containerIds, newContainerId)
 	}
 
+	var projectConfigStr []byte
+	s.db.QueryRow("SELECT project_config FROM apps WHERE deployment_id = ?", deploymentID).Scan(&projectConfigStr)
+	var projectConfig models.ProjectConfig
+	if err := json.Unmarshal(projectConfigStr, &projectConfig); err != nil {
+		return err
+	}
+	if projectConfig.Name == "" {
+		return fmt.Errorf("No project config found for deployment")
+	}
+
 	for _, containerId := range containerIds {
 		err := s.containerManager.StartContainer(ctx, containerId)
+		s.Proxy.AddContainer(projectConfig, containerId)
 		if err != nil {
 			log.Printf("Failed to start container: %v\n", err)
 			return err
@@ -143,8 +171,19 @@ func (s *FluxServer) StopDeployment(ctx context.Context, deploymentID int64) err
 		containerIds = append(containerIds, newContainerId)
 	}
 
+	var projectConfigStr []byte
+	s.db.QueryRow("SELECT project_config FROM apps WHERE deployment_id = ?", deploymentID).Scan(&projectConfigStr)
+	var projectConfig models.ProjectConfig
+	if err := json.Unmarshal(projectConfigStr, &projectConfig); err != nil {
+		return err
+	}
+	if projectConfig.Name == "" {
+		return fmt.Errorf("No project config found for deployment")
+	}
+
 	for _, containerId := range containerIds {
 		err := s.containerManager.StopContainer(ctx, containerId)
+		s.Proxy.RemoveContainer(containerId)
 		if err != nil {
 			log.Printf("Failed to start container: %v\n", err)
 			return err
@@ -176,7 +215,7 @@ func (s *FluxServer) GetStatus(ctx context.Context, containerID string) (string,
 
 func (s *FluxServer) GetDeploymentStatus(ctx context.Context, deploymentID int64) (string, error) {
 	var deployment models.Deployments
-	s.db.QueryRow("SELECT id, urls FROM deployments WHERE id = ?", deploymentID).Scan(&deployment.ID, &deployment.URLs)
+	s.db.QueryRow("SELECT id, url FROM deployments WHERE id = ?", deploymentID).Scan(&deployment.ID, &deployment.URL)
 
 	var containerIds []string
 	rows, err := s.db.Query("SELECT container_id FROM containers WHERE deployment_id = ?", deploymentID)
