@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -178,13 +179,18 @@ func (cp *ContainerProxy) RemoveContainer(containerID string) error {
 }
 
 func (cp *ContainerProxy) Start() {
+	port := os.Getenv("FLUXD_PROXY_PORT")
+	if port == "" {
+		port = "7465"
+	}
+
 	server := &http.Server{
-		Addr:    ":7465",
+		Addr:    fmt.Sprintf(":%s", port),
 		Handler: cp,
 	}
 
 	go func() {
-		log.Printf("Proxy server starting on http://127.0.0.1:7465\n")
+		log.Printf("Proxy server starting on http://127.0.0.1:%s\n", port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Proxy server error: %v", err)
 		}
