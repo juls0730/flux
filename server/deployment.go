@@ -23,7 +23,7 @@ func (s *FluxServer) CreateDeployment(ctx context.Context, projectConfig models.
 		return 0, err
 	}
 
-	_, err = s.db.Exec("INSERT INTO containers (container_id, deployment_id) VALUES (?, ?)", containerID, deploymentID)
+	_, err = s.db.Exec("INSERT INTO containers (container_id, deployment_id, head) VALUES (?, ?, ?)", containerID, deploymentID, true)
 	if err != nil {
 		log.Printf("Failed to get container id: %v\n", err)
 		return 0, err
@@ -65,7 +65,10 @@ func (s *FluxServer) UpgradeDeployment(ctx context.Context, deploymentID int64, 
 		return err
 	}
 
-	s.db.Exec("INSERT INTO containers (container_id, deployment_id) VALUES (?, ?)", containerID, deploymentID)
+	if _, err := s.db.Exec("INSERT INTO containers (container_id, deployment_id, head) VALUES (?, ?, ?)", containerID, deploymentID, true); err != nil {
+		log.Printf("Failed to insert container: %v\n", err)
+		return err
+	}
 
 	// update app in the database
 	if _, err := s.db.Exec("UPDATE apps SET project_config = ?, deployment_id = ? WHERE name = ?", configBytes, deploymentID, projectConfig.Name); err != nil {

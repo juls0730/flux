@@ -2,6 +2,7 @@ package models
 
 type Containers struct {
 	ID           string `json:"id"`
+	Head         bool   `json:"head"` // if the container is the head of the deployment
 	ContainerID  string `json:"container_id"`
 	DeploymentID int64  `json:"deployment_id"`
 	CreatedAt    string `json:"created_at"`

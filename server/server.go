@@ -105,7 +105,7 @@ func NewServer() *FluxServer {
 		config:           serverConfig,
 		db:               db,
 		Proxy: &ContainerProxy{
-			urlMap: make(map[string]*containerRoute),
+			routes: &RouteCache{},
 			db:     db,
 			cm:     containerManager,
 		},
