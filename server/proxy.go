@@ -35,7 +35,7 @@ type containerRoute struct {
 
 func (cp *ContainerProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	cp.mu.RLock()
-	defer cp.mu.RUnlock()
+	// defer cp.mu.RUnlock()
 
 	// Extract app name from host
 	appUrl := r.Host
@@ -72,7 +72,7 @@ func (cp *ContainerProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		container.port = projectConfig.Port
 
-		cp.urlMap[appUrl] = container
+		// cp.urlMap[appUrl] = container
 	}
 
 	if container.proxy == nil {
@@ -83,13 +83,33 @@ func (cp *ContainerProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if containerJSON.State.Status != "running" {
+			log.Printf("Container %s is not running\n", container.containerID)
+			http.Error(w, "Container not running", http.StatusInternalServerError)
+			return
+		}
+
 		url, err := url.Parse(fmt.Sprintf("http://%s:%d", containerJSON.NetworkSettings.IPAddress, container.port))
 		if err != nil {
 			log.Printf("Failed to parse URL: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		container.proxy = httputil.NewSingleHostReverseProxy(url)
+		// container.proxy = httputil.NewSingleHostReverseProxy(url)
+		container.proxy = cp.createProxy(url)
+		if container.proxy == nil {
+			log.Printf("Failed to create proxy for container %s\n", container.containerID)
+			http.Error(w, "Failed to create proxy", http.StatusInternalServerError)
+			container.isActive = false
+			return
+		}
+
+		cp.mu.RUnlock()
+		cp.mu.Lock()
+		cp.urlMap[appUrl] = container
+		cp.mu.Unlock()
+	} else {
+		cp.mu.RUnlock()
 	}
 
 	container.proxy.ServeHTTP(w, r)
@@ -109,7 +129,26 @@ func (cp *ContainerProxy) AddContainer(projectConfig models.ProjectConfig, conta
 		return err
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(containerUrl)
+	container, ok := cp.urlMap[projectConfig.Url]
+	if ok && container.proxy != nil {
+		container.isActive = true
+		return nil
+	}
+	proxy := cp.createProxy(containerUrl)
+
+	newRoute := &containerRoute{
+		url:      projectConfig.Url,
+		proxy:    proxy,
+		port:     projectConfig.Port,
+		isActive: true,
+	}
+
+	cp.urlMap[projectConfig.Url] = newRoute
+	return nil
+}
+
+func (cp *ContainerProxy) createProxy(url *url.URL) *httputil.ReverseProxy {
+	proxy := httputil.NewSingleHostReverseProxy(url)
 
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
@@ -126,17 +165,10 @@ func (cp *ContainerProxy) AddContainer(projectConfig models.ProjectConfig, conta
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Printf("Proxy error: %v", err)
 		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+		r.Body.Close()
 	}
 
-	newRoute := &containerRoute{
-		url:      projectConfig.Url,
-		proxy:    proxy,
-		port:     projectConfig.Port,
-		isActive: true,
-	}
-
-	cp.urlMap[projectConfig.Url] = newRoute
-	return nil
+	return proxy
 }
 
 func (cp *ContainerProxy) RemoveContainer(containerID string) error {

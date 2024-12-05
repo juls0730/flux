@@ -53,6 +53,7 @@ func (s *FluxServer) UpgradeDeployment(ctx context.Context, deploymentID int64, 
 		return err
 	}
 
+	// calls AddContainer in proxy
 	err = s.containerManager.StartContainer(ctx, containerID)
 	if err != nil {
 		log.Printf("Failed to start container: %v\n", err)
@@ -63,8 +64,6 @@ func (s *FluxServer) UpgradeDeployment(ctx context.Context, deploymentID int64, 
 		log.Printf("Failed to wait for container: %v\n", err)
 		return err
 	}
-
-	s.Proxy.AddContainer(projectConfig, containerID)
 
 	s.db.Exec("INSERT INTO containers (container_id, deployment_id) VALUES (?, ?)", containerID, deploymentID)
 
