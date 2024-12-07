@@ -35,22 +35,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	atomic.AddInt64(&deployment.(*Deployment).Proxy.activeRequests, 1)
 
-	container := deployment.(*Deployment).Proxy.currentHead
-	if container == nil {
-		http.Error(w, "No active container found", http.StatusNotFound)
-		return
+	deployment.(*Deployment).Proxy.proxy.ServeHTTP(w, r)
+}
+
+type DeploymentProxy struct {
+	deployment     *Deployment
+	currentHead    *Container
+	proxy          *httputil.ReverseProxy
+	gracePeriod    time.Duration
+	activeRequests int64
+}
+
+func NewDeploymentProxy(deployment *Deployment, head *Container) (*DeploymentProxy, error) {
+	containerJSON, err := dockerClient.ContainerInspect(context.Background(), string(head.ContainerID[:]))
+	if err != nil {
+		return nil, err
 	}
 
-	containerJSON, err := dockerClient.ContainerInspect(context.Background(), string(container.ContainerID[:]))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if containerJSON.NetworkSettings.IPAddress == "" {
+		return nil, fmt.Errorf("No IP address found for container %s", head.ContainerID[0:12])
 	}
 
-	containerUrl, err := url.Parse(fmt.Sprintf("http://%s:%d", containerJSON.NetworkSettings.IPAddress, container.Deployment.Port))
+	containerUrl, err := url.Parse(fmt.Sprintf("http://%s:%d", containerJSON.NetworkSettings.IPAddress, deployment.Port))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, err
 	}
 
 	proxy := &httputil.ReverseProxy{
@@ -58,20 +66,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			req.URL = containerUrl
 			req.Host = containerUrl.Host
 		},
+		Transport: &http.Transport{
+			MaxIdleConns:        100,
+			IdleConnTimeout:     90 * time.Second,
+			MaxIdleConnsPerHost: 100,
+		},
 		ModifyResponse: func(resp *http.Response) error {
-			atomic.AddInt64(&deployment.(*Deployment).Proxy.activeRequests, -1)
+			atomic.AddInt64(&deployment.Proxy.activeRequests, -1)
 			return nil
 		},
 	}
 
-	proxy.ServeHTTP(w, r)
-}
-
-type DeploymentProxy struct {
-	deployment     *Deployment
-	currentHead    *Container
-	gracePeriod    time.Duration
-	activeRequests int64
+	return &DeploymentProxy{
+		deployment:     deployment,
+		currentHead:    head,
+		proxy:          proxy,
+		gracePeriod:    time.Second * 30,
+		activeRequests: 0,
+	}, nil
 }
 
 func (dp *DeploymentProxy) GracefulShutdown(oldContainers []*Container) {

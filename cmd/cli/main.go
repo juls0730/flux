@@ -371,7 +371,7 @@ func main() {
 			os.Exit(0)
 		}
 
-		req, err := http.NewRequest("DELETE", config.DeamonURL+"/deploy/"+projectName, nil)
+		req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments/"+projectName, nil)
 		if err != nil {
 			fmt.Printf("Failed to delete app: %v\n", err)
 			os.Exit(1)

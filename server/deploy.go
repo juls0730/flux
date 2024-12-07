@@ -140,6 +140,22 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		var headContainer *Container
+		for _, container := range deployment.Containers {
+			if container.Head {
+				headContainer = &container
+			}
+		}
+
+		deployment.Proxy, err = NewDeploymentProxy(&deployment, headContainer)
+		if err != nil {
+			log.Printf("Failed to create deployment proxy: %v\n", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		ReverseProxy.AddDeployment(&deployment)
+
 		Apps.AddApp(app.Name, app)
 	} else {
 		log.Printf("Upgrading deployment %s...\n", app.Name)

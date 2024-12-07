@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/juls0730/fluxd/pkg"
 )
@@ -114,12 +113,12 @@ func (am *AppManager) Init() {
 			deployment.Containers = append(deployment.Containers, container)
 		}
 
-		deployment.Proxy = &DeploymentProxy{
-			deployment:     &deployment,
-			currentHead:    headContainer,
-			gracePeriod:    time.Second * 30,
-			activeRequests: 0,
+		deployment.Proxy, err = NewDeploymentProxy(&deployment, headContainer)
+		if err != nil {
+			log.Printf("Failed to create deployment proxy: %v\n", err)
+			return
 		}
+
 		app.Deployment = deployment
 
 		Apps.AddApp(app.Name, &app)
@@ -162,16 +161,8 @@ func CreateDeployment(containerID string, port uint16, appUrl string, db *sql.DB
 	}
 	copy(container.ContainerID[:], containerIDString)
 
-	deployment.Proxy = &DeploymentProxy{
-		deployment:     &deployment,
-		currentHead:    &container,
-		gracePeriod:    time.Second * 30,
-		activeRequests: 0,
-	}
-
 	container.Deployment = &deployment
 	deployment.Containers = append(deployment.Containers, container)
-	ReverseProxy.AddDeployment(&deployment)
 
 	return deployment, nil
 }
@@ -252,11 +243,10 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 
 	// Create a new proxy that points to the new head, and replace the old one, but ensure that the old one is gracefully shutdown
 	oldProxy := deployment.Proxy
-	deployment.Proxy = &DeploymentProxy{
-		deployment:     deployment,
-		currentHead:    &container,
-		gracePeriod:    time.Second * 30,
-		activeRequests: 0,
+	deployment.Proxy, err = NewDeploymentProxy(deployment, &container)
+	if err != nil {
+		log.Printf("Failed to create deployment proxy: %v\n", err)
+		return err
 	}
 
 	var containers []Container

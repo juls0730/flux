@@ -80,7 +80,8 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 		},
 	},
 		&container.HostConfig{
-			NetworkMode: "bridge",
+			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
+			NetworkMode:   "bridge",
 			Mounts: []mount.Mount{
 				{
 					Type:     mount.TypeVolume,
