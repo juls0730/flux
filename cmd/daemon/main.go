@@ -9,11 +9,13 @@ import (
 
 func main() {
 	fluxServer := server.NewServer()
+	server.InitReverseProxy()
 
-	go fluxServer.Proxy.Start()
+	// go fluxServer.Proxy.Start()
 
 	http.HandleFunc("POST /deploy", fluxServer.DeployHandler)
-	http.HandleFunc("DELETE /deploy/{name}", fluxServer.DeleteDeployHandler)
+	http.HandleFunc("DELETE /deployments", fluxServer.DeleteAllDeploymentsHandler)
+	http.HandleFunc("DELETE /deployments/{name}", fluxServer.DeleteDeployHandler)
 	http.HandleFunc("POST /start/{name}", fluxServer.StartDeployHandler)
 	http.HandleFunc("POST /stop/{name}", fluxServer.StopDeployHandler)
 	http.HandleFunc("GET /apps", fluxServer.ListAppsHandler)

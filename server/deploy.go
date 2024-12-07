@@ -1,14 +1,21 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 
-	"github.com/juls0730/fluxd/models"
+	"github.com/juls0730/fluxd/pkg"
+)
+
+var (
+	appInsertStmt *sql.Stmt
 )
 
 type DeployRequest struct {
@@ -17,7 +24,7 @@ type DeployRequest struct {
 }
 
 type DeployResponse struct {
-	App models.App `json:"app"`
+	App App `json:"app"`
 }
 
 func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
@@ -44,25 +51,15 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer deployRequest.Code.Close()
 
-	var projectConfig models.ProjectConfig
+	var projectConfig pkg.ProjectConfig
 	if err := json.NewDecoder(deployRequest.Config).Decode(&projectConfig); err != nil {
 		log.Printf("Failed to decode config: %v\n", err)
 		http.Error(w, "Invalid flux.json", http.StatusBadRequest)
 		return
 	}
 
-	if projectConfig.Name == "" {
-		http.Error(w, "No project name specified", http.StatusBadRequest)
-		return
-	}
-
-	if projectConfig.Url == "" {
-		http.Error(w, "No deployment url specified", http.StatusBadRequest)
-		return
-	}
-
-	if projectConfig.Port == 0 {
-		http.Error(w, "No port specified", http.StatusBadRequest)
+	if projectConfig.Name == "" || projectConfig.Url == "" || projectConfig.Port == 0 {
+		http.Error(w, "Invalid flux.json, a name, url, and port must be specified", http.StatusBadRequest)
 		return
 	}
 
@@ -86,7 +83,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("Building image for project %s...\n", projectConfig.Name)
-	imageName := fmt.Sprintf("%s-image", projectConfig.Name)
+	imageName := fmt.Sprintf("flux_%s-image", projectConfig.Name)
 	buildCmd := exec.Command("pack", "build", imageName, "--builder", s.config.Builder)
 	buildCmd.Dir = projectPath
 	err = buildCmd.Run()
@@ -96,59 +93,61 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var app models.App
-	s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE name = ?", projectConfig.Name).Scan(&app.ID, &app.Name, &app.DeploymentID)
+	app := Apps.GetApp(projectConfig.Name)
 
-	if app.ID == 0 {
-		configBytes, err := json.Marshal(projectConfig)
-		if err != nil {
-			log.Printf("Failed to marshal project config: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+	if app == nil {
+		app = &App{
+			Name: projectConfig.Name,
 		}
+		log.Printf("Creating deployment %s...\n", app.Name)
 
-		containerID, err := s.containerManager.CreateContainer(r.Context(), imageName, projectPath, projectConfig)
+		containerID, err := CreateDockerContainer(r.Context(), imageName, projectPath, projectConfig)
 		if err != nil {
 			log.Printf("Failed to create container: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		deploymentID, err := s.CreateDeployment(r.Context(), projectConfig, containerID)
+		deployment, err := CreateDeployment(containerID, projectConfig.Port, projectConfig.Url, s.db)
+		app.Deployment = deployment
 		if err != nil {
 			log.Printf("Failed to create deployment: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		if appInsertStmt == nil {
+			appInsertStmt, err = s.db.Prepare("INSERT INTO apps (name, deployment_id) VALUES ($1, $2) RETURNING id, name, deployment_id")
+			if err != nil {
+				log.Printf("Failed to prepare statement: %v\n", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
 		// create app in the database
-		appResult, err := s.db.Exec("INSERT INTO apps (name, image, project_path, project_config, deployment_id) VALUES (?, ?, ?, ?, ?)", projectConfig.Name, imageName, projectPath, configBytes, deploymentID)
+		err = appInsertStmt.QueryRow(projectConfig.Name, deployment.ID).Scan(&app.ID, &app.Name, &app.DeploymentID)
 		if err != nil {
 			log.Printf("Failed to insert app: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		appID, err := appResult.LastInsertId()
-		if err != nil {
-			log.Printf("Failed to get app id: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE id = ?", appID).Scan(&app.ID, &app.Name, &app.DeploymentID)
-
-		err = s.StartDeployment(r.Context(), app.DeploymentID)
+		err = deployment.Start(r.Context())
 		if err != nil {
 			log.Printf("Failed to start deployment: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+
+		Apps.AddApp(app.Name, app)
 	} else {
+		log.Printf("Upgrading deployment %s...\n", app.Name)
+
 		// if deploy is not started, start it
-		deploymentStatus, err := s.GetDeploymentStatus(r.Context(), app.DeploymentID)
-		if deploymentStatus != "started" || err != nil {
-			err = s.StartDeployment(r.Context(), app.DeploymentID)
+		deploymentStatus, err := app.Deployment.Status(r.Context())
+		if deploymentStatus != "running" || err != nil {
+			err = app.Deployment.Start(r.Context())
 			if err != nil {
 				log.Printf("Failed to start deployment: %v\n", err)
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -156,7 +155,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		err = s.UpgradeDeployment(r.Context(), app.DeploymentID, projectConfig, imageName, projectPath)
+		err = app.Deployment.Upgrade(r.Context(), projectConfig, imageName, projectPath, s)
 		if err != nil {
 			log.Printf("Failed to upgrade deployment: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -167,26 +166,31 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("App %s deployed successfully!\n", app.Name)
 
 	json.NewEncoder(w).Encode(DeployResponse{
-		App: app,
+		App: *app,
 	})
 }
 
 func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	var app struct {
-		id            int64
-		name          string
-		deployment_id int64
-	}
-	s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE name = ?", name).Scan(&app.id, &app.name, &app.deployment_id)
-
-	if app.id == 0 {
+	app := Apps.GetApp(name)
+	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
 	}
 
-	err := s.StartDeployment(r.Context(), app.deployment_id)
+	status, err := app.Deployment.Status(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if status == "running" {
+		http.Error(w, "App is already running", http.StatusBadRequest)
+		return
+	}
+
+	err = app.Deployment.Start(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -198,19 +202,24 @@ func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) 
 func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	var app struct {
-		id            int64
-		name          string
-		deployment_id int64
-	}
-	s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE name = ?", name).Scan(&app.id, &app.name, &app.deployment_id)
-
-	if app.id == 0 {
+	app := Apps.GetApp(name)
+	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
 	}
 
-	err := s.StopDeployment(r.Context(), app.deployment_id)
+	status, err := app.Deployment.Status(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if status == "stopped" {
+		http.Error(w, "App is already stopped", http.StatusBadRequest)
+		return
+	}
+
+	err = app.Deployment.Stop(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -221,46 +230,31 @@ func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
+	var err error
 
-	var app struct {
-		id            int
-		name          string
-		deployment_id int
-	}
-	s.db.QueryRow("SELECT id, name, deployment_id FROM apps WHERE name = ?", name).Scan(&app.id, &app.name, &app.deployment_id)
-
-	if app.id == 0 {
+	app := Apps.GetApp(name)
+	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
 	}
 
-	var containerId []string
-	rows, err := s.db.Query("SELECT container_id FROM containers WHERE deployment_id = ?", app.deployment_id)
-	if err != nil {
-		log.Printf("Failed to query containers: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
+	log.Printf("Deleting deployment %s...\n", name)
 
-	for rows.Next() {
-		var newContainerId string
-		if err := rows.Scan(&newContainerId); err != nil {
-			log.Printf("Failed to scan container id: %v\n", err)
+	for _, container := range app.Deployment.Containers {
+		err = RemoveDockerContainer(r.Context(), string(container.ContainerID[:]))
+		if err != nil {
+			log.Printf("Failed to remove container: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		containerId = append(containerId, newContainerId)
 	}
 
-	log.Printf("Deleting deployment %s...\n", name)
-
-	for _, container := range containerId {
-		s.containerManager.RemoveContainer(r.Context(), container)
+	err = RemoveVolume(r.Context(), fmt.Sprintf("flux_%s-volume", name))
+	if err != nil {
+		log.Printf("Failed to remove volume: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	s.containerManager.RemoveVolume(r.Context(), fmt.Sprintf("%s-volume", name))
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -269,7 +263,7 @@ func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err = tx.Exec("DELETE FROM deployments WHERE id = ?", app.deployment_id)
+	_, err = tx.Exec("DELETE FROM deployments WHERE id = ?", app.DeploymentID)
 	if err != nil {
 		tx.Rollback()
 		log.Printf("Failed to delete deployment: %v\n", err)
@@ -277,7 +271,7 @@ func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err = tx.Exec("DELETE FROM containers WHERE deployment_id = ?", app.deployment_id)
+	_, err = tx.Exec("DELETE FROM containers WHERE deployment_id = ?", app.DeploymentID)
 	if err != nil {
 		tx.Rollback()
 		log.Printf("Failed to delete containers: %v\n", err)
@@ -285,7 +279,7 @@ func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	_, err = tx.Exec("DELETE FROM apps WHERE id = ?", app.id)
+	_, err = tx.Exec("DELETE FROM apps WHERE id = ?", app.ID)
 	if err != nil {
 		tx.Rollback()
 		log.Printf("Failed to delete app: %v\n", err)
@@ -299,48 +293,109 @@ func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	projectPath := filepath.Join(s.rootDir, "apps", name)
+	err = os.RemoveAll(projectPath)
+	if err != nil {
+		log.Printf("Failed to remove project directory: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	Apps.DeleteApp(name)
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
+	var err error
+
+	for _, app := range Apps.GetAllApps() {
+		for _, container := range app.Deployment.Containers {
+			err = RemoveDockerContainer(r.Context(), string(container.ContainerID[:]))
+			if err != nil {
+				log.Printf("Failed to remove container: %v\n", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+
+		err = RemoveVolume(r.Context(), fmt.Sprintf("flux_%s-volume", app.Name))
+		if err != nil {
+			log.Printf("Failed to remove volume: %v\n", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		log.Printf("Failed to begin transaction: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec("DELETE FROM deployments")
+	if err != nil {
+		tx.Rollback()
+		log.Printf("Failed to delete deployments: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec("DELETE FROM containers")
+	if err != nil {
+		tx.Rollback()
+		log.Printf("Failed to delete containers: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	_, err = tx.Exec("DELETE FROM apps")
+	if err != nil {
+		tx.Rollback()
+		log.Printf("Failed to delete apps: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit transaction: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.RemoveAll(filepath.Join(s.rootDir, "apps")); err != nil {
+		log.Printf("Failed to remove apps directory: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.RemoveAll(filepath.Join(s.rootDir, "deployments")); err != nil {
+		log.Printf("Failed to remove deployments directory: %v\n", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *FluxServer) ListAppsHandler(w http.ResponseWriter, r *http.Request) {
-	var apps []models.App
-	rows, err := s.db.Query("SELECT * FROM apps")
-	if err != nil {
-		log.Printf("Failed to query apps: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var app models.App
-		var configBytes string
-		if err := rows.Scan(&app.ID, &app.Name, &app.Image, &app.ProjectPath, &configBytes, &app.DeploymentID, &app.CreatedAt); err != nil {
-			log.Printf("Failed to scan app: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		err = json.Unmarshal([]byte(configBytes), &app.ProjectConfig)
-		if err != nil {
-			log.Printf("Failed to unmarshal project config: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		apps = append(apps, app)
-	}
-
 	// for each app, get the deployment status
-	for i, app := range apps {
-		deploymentStatus, err := s.GetDeploymentStatus(r.Context(), app.DeploymentID)
+	var apps []*pkg.App
+	for _, app := range Apps.GetAllApps() {
+		var extApp pkg.App
+		deploymentStatus, err := app.Deployment.Status(r.Context())
 		if err != nil {
 			log.Printf("Failed to get deployment status: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		apps[i].DeploymentStatus = deploymentStatus
+		extApp.ID = app.ID
+		extApp.Name = app.Name
+		extApp.DeploymentID = app.DeploymentID
+		extApp.DeploymentStatus = deploymentStatus
+		apps = append(apps, &extApp)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

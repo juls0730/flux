@@ -4,48 +4,38 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"database/sql"
-	"embed"
 	"encoding/json"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 
-	"github.com/juls0730/fluxd/models"
+	_ "embed"
+
+	"github.com/juls0730/fluxd/pkg"
 	_ "github.com/mattn/go-sqlite3"
 )
 
-//go:embed schema.sql
-var schema embed.FS
-
-var DefaultConfig = FluxServerConfig{
-	Builder: "paketobuildpacks/builder-jammy-tiny",
-}
+var (
+	//go:embed schema.sql
+	schemaBytes   []byte
+	DefaultConfig = FluxServerConfig{
+		Builder: "paketobuildpacks/builder-jammy-tiny",
+	}
+	DB *sql.DB
+)
 
 type FluxServerConfig struct {
 	Builder string `json:"builder"`
 }
 
 type FluxServer struct {
-	containerManager *ContainerManager
-	config           FluxServerConfig
-	db               *sql.DB
-	Proxy            *ContainerProxy
-	rootDir          string
+	config  FluxServerConfig
+	db      *sql.DB
+	rootDir string
 }
 
-// var rootDir string
-
-// func init() {
-// 	rootDir = os.Getenv("FLUXD_ROOT_DIR")
-// 	if rootDir == "" {
-// 		rootDir = "/var/fluxd"
-// 	}
-// }
-
 func NewServer() *FluxServer {
-	containerManager := NewContainerManager()
-
 	var serverConfig FluxServerConfig
 
 	rootDir := os.Getenv("FLUXD_ROOT_DIR")
@@ -84,36 +74,26 @@ func NewServer() *FluxServer {
 		log.Fatalf("Failed to create apps directory: %v\n", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(rootDir, "fluxd.db"))
+	DB, err = sql.Open("sqlite3", filepath.Join(rootDir, "fluxd.db"))
 	if err != nil {
 		log.Fatalf("Failed to open database: %v\n", err)
 	}
 
-	// create database schema
-	schemaBytes, err := schema.ReadFile("schema.sql")
-	if err != nil {
-		log.Fatalf("Failed to read schema file: %v\n", err)
-	}
-
-	_, err = db.Exec(string(schemaBytes))
+	_, err = DB.Exec(string(schemaBytes))
 	if err != nil {
 		log.Fatalf("Failed to create database schema: %v\n", err)
 	}
 
+	Apps.Init()
+
 	return &FluxServer{
-		containerManager: containerManager,
-		config:           serverConfig,
-		db:               db,
-		Proxy: &ContainerProxy{
-			routes: &RouteCache{},
-			db:     db,
-			cm:     containerManager,
-		},
+		config:  serverConfig,
+		db:      DB,
 		rootDir: rootDir,
 	}
 }
 
-func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig models.ProjectConfig) (string, error) {
+func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig pkg.ProjectConfig) (string, error) {
 	projectPath := filepath.Join(s.rootDir, "apps", projectConfig.Name)
 	if err := os.MkdirAll(projectPath, 0755); err != nil {
 		log.Printf("Failed to create project directory: %v\n", err)

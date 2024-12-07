@@ -11,13 +11,15 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/briandowns/spinner"
-	"github.com/juls0730/fluxd/models"
+	"github.com/juls0730/fluxd/pkg"
 )
 
 //go:embed config.json
@@ -98,7 +100,7 @@ func getProjectName() string {
 		}
 		defer fluxConfigFile.Close()
 
-		var config models.ProjectConfig
+		var config pkg.ProjectConfig
 		if err := json.NewDecoder(fluxConfigFile).Decode(&config); err != nil {
 			fmt.Printf("Failed to decode flux.json: %v\n", err)
 			os.Exit(1)
@@ -113,10 +115,22 @@ func getProjectName() string {
 }
 
 func main() {
+	loadingSpinner := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: flux <command>")
 		os.Exit(1)
 	}
+
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-signalChannel
+		if loadingSpinner.Active() {
+			loadingSpinner.Stop()
+		}
+
+		os.Exit(0)
+	}()
 
 	command := os.Args[1]
 
@@ -151,7 +165,6 @@ func main() {
 			os.Exit(1)
 		}
 
-		loadingSpinner := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
 		loadingSpinner.Suffix = " Deploying"
 		loadingSpinner.Start()
 
@@ -293,10 +306,63 @@ func main() {
 
 		fmt.Printf("Successfully started %s\n", projectName)
 	case "delete":
+		if len(os.Args) == 3 {
+			if os.Args[2] == "all" {
+				var response string
+				fmt.Print("Are you sure you want to delete all projects? this will delete all volumes and containers associated and cannot be undone. \n[y/N] ")
+				fmt.Scanln(&response)
+
+				if strings.ToLower(response) != "y" {
+					fmt.Println("Aborting...")
+					os.Exit(0)
+				}
+
+				response = ""
+
+				fmt.Printf("Are you really sure you want to delete all projects? \n[y/N] ")
+				fmt.Scanln(&response)
+
+				if strings.ToLower(response) != "y" {
+					fmt.Println("Aborting...")
+					os.Exit(0)
+				}
+
+				req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments", nil)
+				if err != nil {
+					fmt.Printf("Failed to delete deployments: %v\n", err)
+					os.Exit(1)
+				}
+				resp, err := http.DefaultClient.Do(req)
+				if err != nil {
+					fmt.Printf("Failed to delete deployments: %v\n", err)
+					os.Exit(1)
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					responseBody, err := io.ReadAll(resp.Body)
+					if err != nil {
+						fmt.Printf("error reading response body: %v\n", err)
+						os.Exit(1)
+					}
+
+					if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
+						responseBody = responseBody[:len(responseBody)-1]
+					}
+
+					fmt.Printf("Delete failed: %s\n", responseBody)
+					os.Exit(1)
+				}
+
+				fmt.Printf("Successfully deleted all projects\n")
+				return
+			}
+		}
+
 		projectName := getProjectName()
 
 		// ask for confirmation
-		fmt.Printf("Are you sure you want to delete %s? this will delete all volumes and containers associated with the deployment, and cannot be undone. \n[y/N]", projectName)
+		fmt.Printf("Are you sure you want to delete %s? this will delete all volumes and containers associated with the deployment, and cannot be undone. \n[y/N] ", projectName)
 		var response string
 		fmt.Scanln(&response)
 
@@ -340,7 +406,22 @@ func main() {
 			os.Exit(1)
 		}
 
-		var apps []models.App
+		if resp.StatusCode != http.StatusOK {
+			responseBody, err := io.ReadAll(resp.Body)
+			if err != nil {
+				fmt.Printf("error reading response body: %v\n", err)
+				os.Exit(1)
+			}
+
+			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
+				responseBody = responseBody[:len(responseBody)-1]
+			}
+
+			fmt.Printf("List failed: %s\n", responseBody)
+			os.Exit(1)
+		}
+
+		var apps []pkg.App
 		if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
 			fmt.Printf("Failed to decode apps: %v\n", err)
 			os.Exit(1)
@@ -355,7 +436,7 @@ func main() {
 			fmt.Printf("%s (%s)\n", app.Name, app.DeploymentStatus)
 		}
 	case "init":
-		var projectConfig models.ProjectConfig
+		var projectConfig pkg.ProjectConfig
 
 		var response string
 		if len(os.Args) > 2 {
@@ -379,7 +460,8 @@ func main() {
 
 		fmt.Println("What port does your project listen to?")
 		fmt.Scanln(&response)
-		projectConfig.Port, err = strconv.Atoi(response)
+		port, err := strconv.ParseUint(response, 10, 16)
+		projectConfig.Port = uint16(port)
 		if err != nil || projectConfig.Port < 1 || projectConfig.Port > 65535 {
 			fmt.Println("That doesnt look like a valid port", err)
 			os.Exit(1)

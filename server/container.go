@@ -15,25 +15,30 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/joho/godotenv"
-	"github.com/juls0730/fluxd/models"
+	"github.com/juls0730/fluxd/pkg"
 )
 
-type ContainerManager struct {
-	dockerClient *client.Client
+var dockerClient *client.Client
+
+type Container struct {
+	ID           int64 `json:"id"`
+	Head         bool  `json:"head"` // if the container is the head of the deployment
+	Deployment   *Deployment
+	ContainerID  [64]byte `json:"container_id"`
+	DeploymentID int64    `json:"deployment_id"`
 }
 
-func NewContainerManager() *ContainerManager {
-	dockerClient, err := client.NewClientWithOpts(client.FromEnv)
+func init() {
+	log.Printf("Initializing Docker client...\n")
+
+	var err error
+	dockerClient, err = client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
 		log.Fatalf("Failed to create Docker client: %v", err)
 	}
-
-	return &ContainerManager{
-		dockerClient: dockerClient,
-	}
 }
 
-func (cm *ContainerManager) CreateContainer(ctx context.Context, imageName, projectPath string, projectConfig models.ProjectConfig) (string, error) {
+func CreateDockerContainer(ctx context.Context, imageName, projectPath string, projectConfig pkg.ProjectConfig) (string, error) {
 	log.Printf("Deploying container with image %s\n", imageName)
 
 	containerName := fmt.Sprintf("%s-%s", projectConfig.Name, time.Now().Format("20060102-150405"))
@@ -55,10 +60,10 @@ func (cm *ContainerManager) CreateContainer(ctx context.Context, imageName, proj
 		}
 	}
 
-	vol, err := cm.dockerClient.VolumeCreate(ctx, volume.CreateOptions{
+	vol, err := dockerClient.VolumeCreate(ctx, volume.CreateOptions{
 		Driver:     "local",
 		DriverOpts: map[string]string{},
-		Name:       fmt.Sprintf("%s-volume", projectConfig.Name),
+		Name:       fmt.Sprintf("flux_%s-volume", projectConfig.Name),
 	})
 	if err != nil {
 		return "", fmt.Errorf("Failed to create volume: %v", err)
@@ -67,25 +72,15 @@ func (cm *ContainerManager) CreateContainer(ctx context.Context, imageName, proj
 	log.Printf("Volume %s created at %s\n", vol.Name, vol.Mountpoint)
 
 	log.Printf("Creating container %s...\n", containerName)
-	resp, err := cm.dockerClient.ContainerCreate(ctx, &container.Config{
+	resp, err := dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
-		// ExposedPorts: nat.PortSet{
-		// 	nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): {},
-		// },
 		Volumes: map[string]struct{}{
 			vol.Name: {},
 		},
 	},
 		&container.HostConfig{
-			// PortBindings: nat.PortMap{
-			// 	nat.Port(fmt.Sprintf("%d/tcp", projectConfig.Port)): []nat.PortBinding{
-			// 		{
-			// 			HostIP:   "0.0.0.0",
-			// 			HostPort: strconv.Itoa(projectConfig.Port),
-			// 		},
-			// 	},
-			// },
+			NetworkMode: "bridge",
 			Mounts: []mount.Mount{
 				{
 					Type:     mount.TypeVolume,
@@ -107,28 +102,37 @@ func (cm *ContainerManager) CreateContainer(ctx context.Context, imageName, proj
 	return resp.ID, nil
 }
 
-func (cm *ContainerManager) StartContainer(ctx context.Context, containerID string) error {
-	return cm.dockerClient.ContainerStart(ctx, containerID, container.StartOptions{})
+func (c *Container) Start(ctx context.Context) error {
+	return dockerClient.ContainerStart(ctx, string(c.ContainerID[:]), container.StartOptions{})
 }
 
-func (cm *ContainerManager) StopContainer(ctx context.Context, containerID string) error {
-	return cm.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{})
+func (c *Container) Stop(ctx context.Context) error {
+	return dockerClient.ContainerStop(ctx, string(c.ContainerID[:]), container.StopOptions{})
+}
+
+func (c *Container) Remove(ctx context.Context) error {
+	return RemoveDockerContainer(ctx, string(c.ContainerID[:]))
+}
+
+func (c *Container) Wait(ctx context.Context, port uint16) error {
+	return WaitForDockerContainer(ctx, string(c.ContainerID[:]), port)
 }
 
 // RemoveContainer stops and removes a container, but be warned that this will not remove the container from the database
-func (cm *ContainerManager) RemoveContainer(ctx context.Context, containerID string) error {
-	if err := cm.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+func RemoveDockerContainer(ctx context.Context, containerID string) error {
+	if err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
 		return fmt.Errorf("Failed to stop existing container: %v", err)
 	}
 
-	if err := cm.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
+	if err := dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
 		return fmt.Errorf("Failed to remove existing container: %v", err)
 	}
 
 	return nil
 }
 
-func (cm *ContainerManager) WaitForContainer(ctx context.Context, containerID string, containerPort int) error {
+// scuffed af "health check" for docker containers
+func WaitForDockerContainer(ctx context.Context, containerID string, containerPort uint16) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -138,7 +142,7 @@ func (cm *ContainerManager) WaitForContainer(ctx context.Context, containerID st
 			return fmt.Errorf("container failed to become ready in time")
 
 		default:
-			containerJSON, err := cm.dockerClient.ContainerInspect(ctx, containerID)
+			containerJSON, err := dockerClient.ContainerInspect(ctx, containerID)
 			if err != nil {
 				return err
 			}
@@ -155,9 +159,9 @@ func (cm *ContainerManager) WaitForContainer(ctx context.Context, containerID st
 	}
 }
 
-func (cm *ContainerManager) GracefullyRemoveContainer(ctx context.Context, containerID string) error {
+func GracefullyRemoveDockerContainer(ctx context.Context, containerID string) error {
 	timeout := 30
-	err := cm.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{
+	err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{
 		Timeout: &timeout,
 	})
 	if err != nil {
@@ -170,15 +174,15 @@ func (cm *ContainerManager) GracefullyRemoveContainer(ctx context.Context, conta
 	for {
 		select {
 		case <-ctx.Done():
-			return cm.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
+			return dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
 		default:
-			containerJSON, err := cm.dockerClient.ContainerInspect(ctx, containerID)
+			containerJSON, err := dockerClient.ContainerInspect(ctx, containerID)
 			if err != nil {
 				return err
 			}
 
 			if !containerJSON.State.Running {
-				return cm.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
+				return dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
 			}
 
 			time.Sleep(time.Second)
@@ -186,26 +190,26 @@ func (cm *ContainerManager) GracefullyRemoveContainer(ctx context.Context, conta
 	}
 }
 
-func (cm *ContainerManager) RemoveVolume(ctx context.Context, volumeID string) error {
-	if err := cm.dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
+func RemoveVolume(ctx context.Context, volumeID string) error {
+	if err := dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
 		return fmt.Errorf("Failed to remove existing volume: %v", err)
 	}
 
 	return nil
 }
 
-func (cm *ContainerManager) findExistingContainers(ctx context.Context, containerPrefix string) ([]string, error) {
-	containers, err := cm.dockerClient.ContainerList(ctx, container.ListOptions{
+func findExistingDockerContainers(ctx context.Context, containerPrefix string) (map[string]bool, error) {
+	containers, err := dockerClient.ContainerList(ctx, container.ListOptions{
 		All: true,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	var existingContainers []string
+	var existingContainers map[string]bool = make(map[string]bool)
 	for _, container := range containers {
 		if strings.HasPrefix(container.Names[0], fmt.Sprintf("/%s-", containerPrefix)) {
-			existingContainers = append(existingContainers, container.ID)
+			existingContainers[container.ID] = true
 		}
 	}
 
