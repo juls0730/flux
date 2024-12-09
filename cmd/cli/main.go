@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	_ "embed"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,9 +32,70 @@ type Config struct {
 	DeamonURL string `json:"deamon_url"`
 }
 
+func matchesIgnorePattern(path string, info os.FileInfo, patterns []string) bool {
+	normalizedPath := filepath.ToSlash(path)
+	normalizedPath = strings.TrimPrefix(normalizedPath, "./")
+
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" || strings.HasPrefix(pattern, "#") {
+			continue
+		}
+
+		regexPattern := convertGitignorePatternToRegex(pattern)
+
+		matched, err := regexp.MatchString(regexPattern, normalizedPath)
+		if err == nil && matched {
+			if strings.HasSuffix(pattern, "/") && info.IsDir() {
+				return true
+			}
+			if !info.IsDir() {
+				dir := filepath.Dir(normalizedPath)
+				for dir != "." && dir != "/" {
+					dirPattern := convertGitignorePatternToRegex(pattern)
+					if matched, _ := regexp.MatchString(dirPattern, filepath.ToSlash(dir)); matched {
+						return true
+					}
+					dir = filepath.Dir(dir)
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func convertGitignorePatternToRegex(pattern string) string {
+	pattern = strings.TrimSuffix(pattern, "/")
+	pattern = regexp.QuoteMeta(pattern)
+	pattern = strings.ReplaceAll(pattern, "\\*\\*", ".*")
+	pattern = strings.ReplaceAll(pattern, "\\*", "[^/]*")
+	pattern = strings.ReplaceAll(pattern, "\\?", ".")
+	pattern = "(^|.*/)" + pattern + "(/.*)?$"
+
+	return pattern
+}
+
 func compressDirectory(compression pkg.Compression) ([]byte, error) {
 	var buf bytes.Buffer
 	var err error
+
+	var ignoredFiles []string
+	fluxIgnore, err := os.Open(".fluxignore")
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+
+	if fluxIgnore != nil {
+		defer fluxIgnore.Close()
+
+		scanner := bufio.NewScanner(fluxIgnore)
+		for scanner.Scan() {
+			ignoredFiles = append(ignoredFiles, scanner.Text())
+		}
+	}
 
 	var gzWriter *gzip.Writer
 	if compression.Enabled {
@@ -54,7 +117,7 @@ func compressDirectory(compression pkg.Compression) ([]byte, error) {
 			return err
 		}
 
-		if path == "flux.json" || info.IsDir() {
+		if path == "flux.json" || info.IsDir() || matchesIgnorePattern(path, info, ignoredFiles) {
 			return nil
 		}
 
@@ -98,6 +161,15 @@ func compressDirectory(compression pkg.Compression) ([]byte, error) {
 	}
 
 	return buf.Bytes(), nil
+}
+
+func arrayContains(arr []string, str string) bool {
+	for _, a := range arr {
+		if a == str {
+			return true
+		}
+	}
+	return false
 }
 
 func getProjectName(command string, args []string) (string, error) {

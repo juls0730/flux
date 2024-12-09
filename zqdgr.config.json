@@ -1,9 +1,9 @@
 {
-    "name": "Go Project",
+    "name": "Flux",
     "version": "0.0.1",
-    "description": "Example description",
-    "author": "you",
-    "license": "BSL-1.0",
+    "description": "Flux is a lightweight self-hosted pseudo-paas for golang web apps.",
+    "author": "juls0730",
+    "license": "MIT",
     "scripts": {
         "build:daemon": "go build -o fluxd cmd/daemon/main.go",
         "build:cli": "go build -o flux cmd/cli/main.go",
