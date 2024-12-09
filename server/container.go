@@ -20,10 +20,17 @@ import (
 
 var dockerClient *client.Client
 
+type Volume struct {
+	ID          int64  `json:"id"`
+	VolumeID    string `json:"volume_id"`
+	ContainerID int64  `json:"container_id"`
+}
+
 type Container struct {
 	ID           int64 `json:"id"`
 	Head         bool  `json:"head"` // if the container is the head of the deployment
 	Deployment   *Deployment
+	Volumes      []Volume `json:"volumes"`
 	ContainerID  [64]byte `json:"container_id"`
 	DeploymentID int64    `json:"deployment_id"`
 }
@@ -38,7 +45,26 @@ func init() {
 	}
 }
 
-func CreateDockerContainer(ctx context.Context, imageName, projectPath string, projectConfig pkg.ProjectConfig) (string, error) {
+func CreateVolume(ctx context.Context, name string) (vol *Volume, err error) {
+	dockerVolume, err := dockerClient.VolumeCreate(ctx, volume.CreateOptions{
+		Driver:     "local",
+		DriverOpts: map[string]string{},
+		Name:       name,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("Failed to create volume: %v", err)
+	}
+
+	log.Printf("Volume %s created at %s\n", dockerVolume.Name, dockerVolume.Mountpoint)
+
+	vol = &Volume{
+		VolumeID: dockerVolume.Name,
+	}
+
+	return vol, nil
+}
+
+func CreateDockerContainer(ctx context.Context, imageName, projectPath string, projectConfig pkg.ProjectConfig) (c *Container, err error) {
 	log.Printf("Deploying container with image %s\n", imageName)
 
 	containerName := fmt.Sprintf("%s-%s", projectConfig.Name, time.Now().Format("20060102-150405"))
@@ -46,13 +72,13 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 	if projectConfig.EnvFile != "" {
 		envBytes, err := os.Open(filepath.Join(projectPath, projectConfig.EnvFile))
 		if err != nil {
-			return "", fmt.Errorf("Failed to open env file: %v", err)
+			return nil, fmt.Errorf("Failed to open env file: %v", err)
 		}
 		defer envBytes.Close()
 
 		envVars, err := godotenv.Parse(envBytes)
 		if err != nil {
-			return "", fmt.Errorf("Failed to parse env file: %v", err)
+			return nil, fmt.Errorf("Failed to parse env file: %v", err)
 		}
 
 		for key, value := range envVars {
@@ -60,23 +86,14 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 		}
 	}
 
-	vol, err := dockerClient.VolumeCreate(ctx, volume.CreateOptions{
-		Driver:     "local",
-		DriverOpts: map[string]string{},
-		Name:       fmt.Sprintf("flux_%s-volume", projectConfig.Name),
-	})
-	if err != nil {
-		return "", fmt.Errorf("Failed to create volume: %v", err)
-	}
-
-	log.Printf("Volume %s created at %s\n", vol.Name, vol.Mountpoint)
+	vol, err := CreateVolume(ctx, fmt.Sprintf("flux_%s-volume", projectConfig.Name))
 
 	log.Printf("Creating container %s...\n", containerName)
 	resp, err := dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
 		Volumes: map[string]struct{}{
-			vol.Name: {},
+			vol.VolumeID: {},
 		},
 	},
 		&container.HostConfig{
@@ -85,7 +102,7 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 			Mounts: []mount.Mount{
 				{
 					Type:     mount.TypeVolume,
-					Source:   vol.Name,
+					Source:   vol.VolumeID,
 					Target:   "/workspace",
 					ReadOnly: false,
 				},
@@ -96,11 +113,16 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 		containerName,
 	)
 	if err != nil {
-		return "", fmt.Errorf("Failed to create container: %v", err)
+		return nil, fmt.Errorf("Failed to create container: %v", err)
+	}
+
+	c = &Container{
+		ContainerID: [64]byte([]byte(resp.ID)),
+		Volumes:     []Volume{*vol},
 	}
 
 	log.Printf("Created new container: %s\n", containerName)
-	return resp.ID, nil
+	return c, nil
 }
 
 func (c *Container) Start(ctx context.Context) error {
@@ -112,7 +134,43 @@ func (c *Container) Stop(ctx context.Context) error {
 }
 
 func (c *Container) Remove(ctx context.Context) error {
-	return RemoveDockerContainer(ctx, string(c.ContainerID[:]))
+	err := RemoveDockerContainer(ctx, string(c.ContainerID[:]))
+
+	if err != nil {
+		return fmt.Errorf("Failed to remove container (%s): %v", c.ContainerID[:12], err)
+	}
+
+	tx, err := Flux.db.Begin()
+	if err != nil {
+		log.Printf("Failed to begin transaction: %v\n", err)
+		return err
+	}
+
+	_, err = tx.Exec("DELETE FROM containers WHERE container_id = ?", c.ContainerID[:])
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	for _, volume := range c.Volumes {
+		if err := RemoveVolume(ctx, volume.VolumeID); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("Failed to remove volume (%s): %v", volume.VolumeID, err)
+		}
+
+		_, err = tx.Exec("DELETE FROM volumes WHERE volume_id = ?", volume.VolumeID)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		log.Printf("Failed to commit transaction: %v\n", err)
+		return err
+	}
+
+	return nil
 }
 
 func (c *Container) Wait(ctx context.Context, port uint16) error {
@@ -122,11 +180,11 @@ func (c *Container) Wait(ctx context.Context, port uint16) error {
 // RemoveContainer stops and removes a container, but be warned that this will not remove the container from the database
 func RemoveDockerContainer(ctx context.Context, containerID string) error {
 	if err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
-		return fmt.Errorf("Failed to stop existing container: %v", err)
+		return fmt.Errorf("Failed to stop container (%s): %v", containerID[:12], err)
 	}
 
 	if err := dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
-		return fmt.Errorf("Failed to remove existing container: %v", err)
+		return fmt.Errorf("Failed to remove container (%s): %v", containerID[:12], err)
 	}
 
 	return nil
@@ -192,8 +250,10 @@ func GracefullyRemoveDockerContainer(ctx context.Context, containerID string) er
 }
 
 func RemoveVolume(ctx context.Context, volumeID string) error {
+	log.Printf("Removed volume %s\n", volumeID)
+
 	if err := dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
-		return fmt.Errorf("Failed to remove existing volume: %v", err)
+		return fmt.Errorf("Failed to remove volume (%s): %v", volumeID, err)
 	}
 
 	return nil

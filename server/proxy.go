@@ -7,13 +7,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-var ReverseProxy *Proxy
 
 type Proxy struct {
 	deployments sync.Map
@@ -111,32 +108,7 @@ func (dp *DeploymentProxy) GracefulShutdown(oldContainers []*Container) {
 	for _, container := range oldContainers {
 		err := RemoveDockerContainer(context.Background(), string(container.ContainerID[:]))
 		if err != nil {
-			log.Printf("Failed to remove container: %v\n", err)
+			log.Printf("Failed to remove container (%s): %v\n", container.ContainerID[:12], err)
 		}
 	}
-}
-
-func InitProxy(apps *AppManager) {
-	ReverseProxy = &Proxy{}
-
-	apps.Range(func(key, value interface{}) bool {
-		app := value.(*App)
-		ReverseProxy.AddDeployment(&app.Deployment)
-		return true
-	})
-}
-
-func InitReverseProxy() {
-	InitProxy(Apps)
-	port := os.Getenv("FLUXD_PROXY_PORT")
-	if port == "" {
-		port = "7465"
-	}
-
-	go func() {
-		log.Printf("Proxy server starting on http://127.0.0.1:%s\n", port)
-		if err := http.ListenAndServe(fmt.Sprintf(":%s", port), ReverseProxy); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Proxy server error: %v", err)
-		}
-	}()
 }

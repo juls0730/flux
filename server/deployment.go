@@ -5,15 +5,18 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/juls0730/fluxd/pkg"
 )
 
 var (
-	Apps                 *AppManager = new(AppManager)
 	deploymentInsertStmt *sql.Stmt
 	containerInsertStmt  *sql.Stmt
+	volumeInsertStmt     *sql.Stmt
+	updateVolumeStmt     *sql.Stmt
 )
 
 type AppManager struct {
@@ -25,6 +28,28 @@ type App struct {
 	Deployment   Deployment `json:"-"`
 	Name         string     `json:"name,omitempty"`
 	DeploymentID int64      `json:"deployment_id,omitempty"`
+}
+
+func (app *App) Remove(ctx context.Context) error {
+	err := app.Deployment.Remove(ctx)
+	if err != nil {
+		log.Printf("Failed to remove deployment: %v\n", err)
+		return err
+	}
+
+	_, err = Flux.db.Exec("DELETE FROM apps WHERE id = ?", app.ID)
+	if err != nil {
+		log.Printf("Failed to delete app: %v\n", err)
+		return err
+	}
+
+	projectPath := filepath.Join(Flux.rootDir, "apps", app.Name)
+	err = os.RemoveAll(projectPath)
+	if err != nil {
+		return fmt.Errorf("Failed to remove project directory: %v", err)
+	}
+
+	return nil
 }
 
 type Deployment struct {
@@ -59,18 +84,30 @@ func (am *AppManager) AddApp(name string, app *App) {
 	am.Store(name, app)
 }
 
-func (am *AppManager) DeleteApp(name string) {
+func (am *AppManager) DeleteApp(name string) error {
+	app := am.GetApp(name)
+	if app == nil {
+		return fmt.Errorf("App not found")
+	}
+
+	err := app.Remove(context.Background())
+	if err != nil {
+		return err
+	}
+
 	am.Delete(name)
+
+	return nil
 }
 
-func (am *AppManager) Init() {
+func (am *AppManager) Init(db *sql.DB) {
 	log.Printf("Initializing deployments...\n")
 
-	if DB == nil {
+	if db == nil {
 		log.Panicf("DB is nil")
 	}
 
-	rows, err := DB.Query("SELECT id, name, deployment_id FROM apps")
+	rows, err := db.Query("SELECT id, name, deployment_id FROM apps")
 	if err != nil {
 		log.Printf("Failed to query apps: %v\n", err)
 		return
@@ -90,14 +127,15 @@ func (am *AppManager) Init() {
 	for _, app := range apps {
 		var deployment Deployment
 		var headContainer *Container
-		DB.QueryRow("SELECT id, url, port FROM deployments WHERE id = ?", app.DeploymentID).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
+		db.QueryRow("SELECT id, url, port FROM deployments WHERE id = ?", app.DeploymentID).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
 		deployment.Containers = make([]Container, 0)
 
-		rows, err := DB.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
+		rows, err = db.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
 		if err != nil {
 			log.Printf("Failed to query containers: %v\n", err)
 			return
 		}
+		defer rows.Close()
 
 		for rows.Next() {
 			var container Container
@@ -113,6 +151,24 @@ func (am *AppManager) Init() {
 			deployment.Containers = append(deployment.Containers, container)
 		}
 
+		for i, container := range deployment.Containers {
+			var volumes []Volume
+			rows, err := db.Query("SELECT id, volume_id, container_id FROM volumes WHERE container_id = ?", container.ID)
+			if err != nil {
+				log.Printf("Failed to query volumes: %v\n", err)
+				return
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var volume Volume
+				rows.Scan(&volume.ID, &volume.VolumeID, &volume.ContainerID)
+				volumes = append(volumes, volume)
+			}
+
+			deployment.Containers[i].Volumes = volumes
+		}
+
 		deployment.Proxy, err = NewDeploymentProxy(&deployment, headContainer)
 		if err != nil {
 			log.Printf("Failed to create deployment proxy: %v\n", err)
@@ -121,12 +177,12 @@ func (am *AppManager) Init() {
 
 		app.Deployment = deployment
 
-		Apps.AddApp(app.Name, &app)
+		am.AddApp(app.Name, &app)
 	}
 }
 
 // Creates a deployment and containers in the database
-func CreateDeployment(containerID string, port uint16, appUrl string, db *sql.DB) (Deployment, error) {
+func CreateDeployment(container Container, port uint16, appUrl string, db *sql.DB) (Deployment, error) {
 	var deployment Deployment
 	var err error
 
@@ -144,7 +200,6 @@ func CreateDeployment(containerID string, port uint16, appUrl string, db *sql.DB
 		return Deployment{}, err
 	}
 
-	var container Container
 	if containerInsertStmt == nil {
 		containerInsertStmt, err = db.Prepare("INSERT INTO containers (container_id, deployment_id, head) VALUES ($1, $2, $3) RETURNING id, container_id, deployment_id, head")
 		if err != nil {
@@ -154,12 +209,27 @@ func CreateDeployment(containerID string, port uint16, appUrl string, db *sql.DB
 	}
 
 	var containerIDString string
-	err = containerInsertStmt.QueryRow(containerID, deployment.ID, true).Scan(&container.ID, &containerIDString, &container.DeploymentID, &container.Head)
+	err = containerInsertStmt.QueryRow(container.ContainerID[:], deployment.ID, true).Scan(&container.ID, &containerIDString, &container.DeploymentID, &container.Head)
 	if err != nil {
 		log.Printf("Failed to get container id: %v\n", err)
 		return Deployment{}, err
 	}
 	copy(container.ContainerID[:], containerIDString)
+
+	for i, volume := range container.Volumes {
+		if volumeInsertStmt == nil {
+			volumeInsertStmt, err = db.Prepare("INSERT INTO volumes (volume_id, container_id) VALUES (?, ?) RETURNING id, volume_id, container_id")
+			if err != nil {
+				log.Printf("Failed to prepare statement: %v\n", err)
+				return Deployment{}, err
+			}
+		}
+
+		if err := volumeInsertStmt.QueryRow(volume.VolumeID, container.ID).Scan(&container.Volumes[i].ID, &container.Volumes[i].VolumeID, &container.Volumes[i].ContainerID); err != nil {
+			log.Printf("Failed to insert volume: %v\n", err)
+			return Deployment{}, err
+		}
+	}
 
 	container.Deployment = &deployment
 	deployment.Containers = append(deployment.Containers, container)
@@ -167,22 +237,22 @@ func CreateDeployment(containerID string, port uint16, appUrl string, db *sql.DB
 	return deployment, nil
 }
 
-func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, imageName string, projectPath string, s *FluxServer) error {
+func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, imageName string, projectPath string) error {
 	existingContainers, err := findExistingDockerContainers(ctx, projectConfig.Name)
 	if err != nil {
 		return fmt.Errorf("Failed to find existing containers: %v", err)
 	}
 
 	// Deploy new container before deleting old one
-	containerID, err := CreateDockerContainer(ctx, imageName, projectPath, projectConfig)
-	if err != nil {
+	c, err := CreateDockerContainer(ctx, imageName, projectPath, projectConfig)
+	if err != nil || c == nil {
 		log.Printf("Failed to create container: %v\n", err)
 		return err
 	}
 
-	var container Container
+	var container Container = *c
 	if containerInsertStmt == nil {
-		containerInsertStmt, err = DB.Prepare("INSERT INTO containers (container_id, deployment_id, head) VALUES ($1, $2, $3) RETURNING id, container_id, deployment_id, head")
+		containerInsertStmt, err = Flux.db.Prepare("INSERT INTO containers (container_id, deployment_id, head) VALUES ($1, $2, $3) RETURNING id, container_id, deployment_id, head")
 		if err != nil {
 			log.Printf("Failed to prepare statement: %v\n", err)
 			return err
@@ -190,17 +260,48 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	}
 
 	var containerIDString string
-	err = containerInsertStmt.QueryRow(containerID, deployment.ID, true).Scan(&container.ID, &containerIDString, &container.DeploymentID, &container.Head)
+	err = containerInsertStmt.QueryRow(container.ContainerID[:], deployment.ID, true).Scan(&container.ID, &containerIDString, &container.DeploymentID, &container.Head)
 	if err != nil {
 		log.Printf("Failed to get container id: %v\n", err)
 		return err
 	}
 	container.Deployment = deployment
 
+	// the space time complexity of this is pretty bad, but it works
+	for _, existingContainer := range deployment.Containers {
+		if !existingContainer.Head {
+			continue
+		}
+
+		for _, volume := range existingContainer.Volumes {
+			var targetVolume *Volume
+			for i, volume := range container.Volumes {
+				if volume.VolumeID == volume.VolumeID {
+					targetVolume = &container.Volumes[i]
+					break
+				}
+			}
+
+			if updateVolumeStmt == nil {
+				updateVolumeStmt, err = Flux.db.Prepare("UPDATE volumes SET container_id = ? WHERE id = ? RETURNING id, volume_id, container_id")
+				if err != nil {
+					log.Printf("Failed to prepare statement: %v\n", err)
+					return err
+				}
+			}
+
+			err := updateVolumeStmt.QueryRow(container.ID, volume.ID).Scan(&targetVolume.ID, &targetVolume.VolumeID, &targetVolume.ContainerID)
+			if err != nil {
+				log.Printf("Failed to update volume: %v\n", err)
+				return err
+			}
+		}
+	}
+
 	copy(container.ContainerID[:], containerIDString)
 	deployment.Containers = append(deployment.Containers, container)
 
-	log.Printf("Starting container %s...\n", containerID)
+	log.Printf("Starting container %s...\n", container.ContainerID[:])
 	err = container.Start(ctx)
 	if err != nil {
 		log.Printf("Failed to start container: %v\n", err)
@@ -212,7 +313,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := Flux.db.Begin()
 	if err != nil {
 		log.Printf("Failed to begin transaction: %v\n", err)
 		return err
@@ -235,12 +336,6 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
-	tx, err = s.db.Begin()
-	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
-		return err
-	}
-
 	// Create a new proxy that points to the new head, and replace the old one, but ensure that the old one is gracefully shutdown
 	oldProxy := deployment.Proxy
 	deployment.Proxy, err = NewDeploymentProxy(deployment, &container)
@@ -249,13 +344,19 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
+	tx, err = Flux.db.Begin()
+	if err != nil {
+		log.Printf("Failed to begin transaction: %v\n", err)
+		return err
+	}
+
 	var containers []Container
 	var oldContainers []*Container
 	for _, container := range deployment.Containers {
 		if existingContainers[string(container.ContainerID[:])] {
-			log.Printf("Stopping existing container: %s\n", container.ContainerID[0:12])
+			log.Printf("Deleting container from db: %s\n", container.ContainerID[0:12])
 
-			_, err = tx.Exec("DELETE FROM containers WHERE container_id = ?", string(container.ContainerID[:]))
+			_, err = tx.Exec("DELETE FROM containers WHERE id = ?", container.ID)
 			oldContainers = append(oldContainers, &container)
 
 			if err != nil {
@@ -269,18 +370,25 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		containers = append(containers, container)
 	}
 
-	if oldProxy != nil {
-		go oldProxy.GracefulShutdown(oldContainers)
-	}
-
-	deployment.Containers = containers
-
-	ReverseProxy.AddDeployment(deployment)
-
 	if err := tx.Commit(); err != nil {
 		log.Printf("Failed to commit transaction: %v\n", err)
 		return err
 	}
+
+	if oldProxy != nil {
+		go oldProxy.GracefulShutdown(oldContainers)
+	} else {
+		for _, container := range oldContainers {
+			err := RemoveDockerContainer(context.Background(), string(container.ContainerID[:]))
+			if err != nil {
+				log.Printf("Failed to remove container: %v\n", err)
+			}
+		}
+	}
+
+	deployment.Containers = containers
+
+	Flux.proxy.AddDeployment(deployment)
 
 	return nil
 }
@@ -293,6 +401,24 @@ func arrayContains(arr []string, str string) bool {
 	}
 
 	return false
+}
+
+func (d *Deployment) Remove(ctx context.Context) error {
+	for _, container := range d.Containers {
+		err := container.Remove(ctx)
+		if err != nil {
+			log.Printf("Failed to remove container (%s): %v\n", container.ContainerID[:12], err)
+			return err
+		}
+	}
+
+	_, err := Flux.db.Exec("DELETE FROM deployments WHERE id = ?", d.ID)
+	if err != nil {
+		log.Printf("Failed to delete deployment: %v\n", err)
+		return err
+	}
+
+	return nil
 }
 
 func (d *Deployment) Start(ctx context.Context) error {

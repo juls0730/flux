@@ -5,8 +5,10 @@ import (
 	"compress/gzip"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 
@@ -21,18 +23,25 @@ var (
 	schemaBytes   []byte
 	DefaultConfig = FluxServerConfig{
 		Builder: "paketobuildpacks/builder-jammy-tiny",
+		Compression: pkg.Compression{
+			Enabled: false,
+			Level:   0,
+		},
 	}
-	DB *sql.DB
+	Flux *FluxServer
 )
 
 type FluxServerConfig struct {
-	Builder string `json:"builder"`
+	Builder     string          `json:"builder"`
+	Compression pkg.Compression `json:"compression"`
 }
 
 type FluxServer struct {
-	config  FluxServerConfig
-	db      *sql.DB
-	rootDir string
+	config     FluxServerConfig
+	db         *sql.DB
+	proxy      *Proxy
+	rootDir    string
+	appManager *AppManager
 }
 
 func NewServer() *FluxServer {
@@ -74,40 +83,79 @@ func NewServer() *FluxServer {
 		log.Fatalf("Failed to create apps directory: %v\n", err)
 	}
 
-	DB, err = sql.Open("sqlite3", filepath.Join(rootDir, "fluxd.db"))
+	db, err := sql.Open("sqlite3", filepath.Join(rootDir, "fluxd.db"))
 	if err != nil {
 		log.Fatalf("Failed to open database: %v\n", err)
 	}
 
-	_, err = DB.Exec(string(schemaBytes))
+	_, err = db.Exec(string(schemaBytes))
 	if err != nil {
 		log.Fatalf("Failed to create database schema: %v\n", err)
 	}
 
-	Apps.Init()
+	appManager := new(AppManager)
+	appManager.Init(db)
 
-	return &FluxServer{
-		config:  serverConfig,
-		db:      DB,
-		rootDir: rootDir,
+	proxy := &Proxy{}
+
+	appManager.Range(func(key, value interface{}) bool {
+		app := value.(*App)
+		proxy.AddDeployment(&app.Deployment)
+		return true
+	})
+
+	port := os.Getenv("FLUXD_PROXY_PORT")
+	if port == "" {
+		port = "7465"
 	}
+
+	go func() {
+		log.Printf("Proxy server starting on http://127.0.0.1:%s\n", port)
+		if err := http.ListenAndServe(fmt.Sprintf(":%s", port), proxy); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Proxy server error: %v", err)
+		}
+	}()
+
+	Flux = &FluxServer{
+		config:     serverConfig,
+		db:         db,
+		proxy:      proxy,
+		appManager: appManager,
+		rootDir:    rootDir,
+	}
+
+	return Flux
 }
 
 func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig pkg.ProjectConfig) (string, error) {
+	var err error
 	projectPath := filepath.Join(s.rootDir, "apps", projectConfig.Name)
-	if err := os.MkdirAll(projectPath, 0755); err != nil {
+	if err = os.MkdirAll(projectPath, 0755); err != nil {
 		log.Printf("Failed to create project directory: %v\n", err)
 		return "", err
 	}
 
-	gzReader, err := gzip.NewReader(code)
-	if err != nil {
-		log.Printf("Failed to create gzip reader: %v\n", err)
-		return "", err
-	}
-	defer gzReader.Close()
+	var gzReader *gzip.Reader
+	defer func() {
+		if gzReader != nil {
+			gzReader.Close()
+		}
+	}()
 
-	tarReader := tar.NewReader(gzReader)
+	if s.config.Compression.Enabled {
+		gzReader, err = gzip.NewReader(code)
+		if err != nil {
+			log.Printf("Failed to create gzip reader: %v\n", err)
+			return "", err
+		}
+	}
+	var tarReader *tar.Reader
+
+	if gzReader != nil {
+		tarReader = tar.NewReader(gzReader)
+	} else {
+		tarReader = tar.NewReader(code)
+	}
 
 	log.Printf("Extracting files for %s...\n", projectPath)
 	for {
@@ -126,12 +174,12 @@ func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig pkg.ProjectConf
 		// Handle different file types
 		switch header.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(path, 0755); err != nil {
+			if err = os.MkdirAll(path, 0755); err != nil {
 				log.Printf("Failed to extract directory: %v\n", err)
 				return "", err
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			if err = os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 				log.Printf("Failed to extract directory: %v\n", err)
 				return "", err
 			}
@@ -143,7 +191,7 @@ func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig pkg.ProjectConf
 			}
 			defer outFile.Close()
 
-			if _, err := io.Copy(outFile, tarReader); err != nil {
+			if _, err = io.Copy(outFile, tarReader); err != nil {
 				log.Printf("Failed to copy file during extraction: %v\n", err)
 				return "", err
 			}

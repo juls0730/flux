@@ -7,9 +7,7 @@ import (
 	"log"
 	"mime/multipart"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/juls0730/fluxd/pkg"
 )
@@ -93,7 +91,11 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app := Apps.GetApp(projectConfig.Name)
+	if Flux.appManager == nil {
+		panic("App manager is nil")
+	}
+
+	app := Flux.appManager.GetApp(projectConfig.Name)
 
 	if app == nil {
 		app = &App{
@@ -101,14 +103,14 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("Creating deployment %s...\n", app.Name)
 
-		containerID, err := CreateDockerContainer(r.Context(), imageName, projectPath, projectConfig)
-		if err != nil {
+		container, err := CreateDockerContainer(r.Context(), imageName, projectPath, projectConfig)
+		if err != nil || container == nil {
 			log.Printf("Failed to create container: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
-		deployment, err := CreateDeployment(containerID, projectConfig.Port, projectConfig.Url, s.db)
+		deployment, err := CreateDeployment(*container, projectConfig.Port, projectConfig.Url, s.db)
 		app.Deployment = deployment
 		if err != nil {
 			log.Printf("Failed to create deployment: %v\n", err)
@@ -154,9 +156,9 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		ReverseProxy.AddDeployment(&deployment)
+		Flux.proxy.AddDeployment(&deployment)
 
-		Apps.AddApp(app.Name, app)
+		Flux.appManager.AddApp(app.Name, app)
 	} else {
 		log.Printf("Upgrading deployment %s...\n", app.Name)
 
@@ -171,7 +173,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		err = app.Deployment.Upgrade(r.Context(), projectConfig, imageName, projectPath, s)
+		err = app.Deployment.Upgrade(r.Context(), projectConfig, imageName, projectPath)
 		if err != nil {
 			log.Printf("Failed to upgrade deployment: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -189,7 +191,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	app := Apps.GetApp(name)
+	app := Flux.appManager.GetApp(name)
 	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
@@ -218,7 +220,7 @@ func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) 
 func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	app := Apps.GetApp(name)
+	app := Flux.appManager.GetApp(name)
 	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
@@ -246,150 +248,28 @@ func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	var err error
-
-	app := Apps.GetApp(name)
-	if app == nil {
-		http.Error(w, "App not found", http.StatusNotFound)
-		return
-	}
 
 	log.Printf("Deleting deployment %s...\n", name)
 
-	for _, container := range app.Deployment.Containers {
-		err = RemoveDockerContainer(r.Context(), string(container.ContainerID[:]))
-		if err != nil {
-			log.Printf("Failed to remove container: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
+	err := Flux.appManager.DeleteApp(name)
 
-	err = RemoveVolume(r.Context(), fmt.Sprintf("flux_%s-volume", name))
 	if err != nil {
-		log.Printf("Failed to remove volume: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	_, err = tx.Exec("DELETE FROM deployments WHERE id = ?", app.DeploymentID)
-	if err != nil {
-		tx.Rollback()
-		log.Printf("Failed to delete deployment: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	_, err = tx.Exec("DELETE FROM containers WHERE deployment_id = ?", app.DeploymentID)
-	if err != nil {
-		tx.Rollback()
-		log.Printf("Failed to delete containers: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	_, err = tx.Exec("DELETE FROM apps WHERE id = ?", app.ID)
-	if err != nil {
-		tx.Rollback()
 		log.Printf("Failed to delete app: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	projectPath := filepath.Join(s.rootDir, "apps", name)
-	err = os.RemoveAll(projectPath)
-	if err != nil {
-		log.Printf("Failed to remove project directory: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	Apps.DeleteApp(name)
 
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
-	var err error
-
-	for _, app := range Apps.GetAllApps() {
-		for _, container := range app.Deployment.Containers {
-			err = RemoveDockerContainer(r.Context(), string(container.ContainerID[:]))
-			if err != nil {
-				log.Printf("Failed to remove container: %v\n", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		err = RemoveVolume(r.Context(), fmt.Sprintf("flux_%s-volume", app.Name))
+	for _, app := range Flux.appManager.GetAllApps() {
+		err := app.Remove(r.Context())
 		if err != nil {
-			log.Printf("Failed to remove volume: %v\n", err)
+			log.Printf("Failed to remove app: %v\n", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	_, err = tx.Exec("DELETE FROM deployments")
-	if err != nil {
-		tx.Rollback()
-		log.Printf("Failed to delete deployments: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	_, err = tx.Exec("DELETE FROM containers")
-	if err != nil {
-		tx.Rollback()
-		log.Printf("Failed to delete containers: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	_, err = tx.Exec("DELETE FROM apps")
-	if err != nil {
-		tx.Rollback()
-		log.Printf("Failed to delete apps: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := os.RemoveAll(filepath.Join(s.rootDir, "apps")); err != nil {
-		log.Printf("Failed to remove apps directory: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := os.RemoveAll(filepath.Join(s.rootDir, "deployments")); err != nil {
-		log.Printf("Failed to remove deployments directory: %v\n", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -398,7 +278,7 @@ func (s *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.
 func (s *FluxServer) ListAppsHandler(w http.ResponseWriter, r *http.Request) {
 	// for each app, get the deployment status
 	var apps []*pkg.App
-	for _, app := range Apps.GetAllApps() {
+	for _, app := range Flux.appManager.GetAllApps() {
 		var extApp pkg.App
 		deploymentStatus, err := app.Deployment.Status(r.Context())
 		if err != nil {
@@ -416,4 +296,11 @@ func (s *FluxServer) ListAppsHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(apps)
+}
+
+func (s *FluxServer) DaemonInfoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pkg.Info{
+		Compression: s.config.Compression,
+	})
 }
