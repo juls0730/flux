@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/briandowns/spinner"
-	"github.com/juls0730/fluxd/pkg"
+	"github.com/juls0730/flux/pkg"
 )
 
 //go:embed config.json

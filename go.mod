@@ -1,4 +1,4 @@
-module github.com/juls0730/fluxd
+module github.com/juls0730/flux
 
 go 1.23.3
 

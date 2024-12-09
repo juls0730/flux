@@ -5,7 +5,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
-	"github.com/juls0730/fluxd/server"
+	"github.com/juls0730/flux/server"
 )
 
 func main() {

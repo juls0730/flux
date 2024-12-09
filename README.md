@@ -7,23 +7,22 @@ Flux is a lightweight self-hosted pseudo-paas for golang web apps that emphasize
 ## Usage
 
 To get started you'll want [ZQDGR](https://github.com/juls0730/zqdgr), and you can start the daemon either with:
+
 ```
 zqdgr build:daemon
 sudo ./fluxd
 ```
-or with 
+
+or with
+
 ```
 FLUXD_ROOT_DIR=$PWD/fluxdd zqdgr run:daemon
 ```
 
-To get started with the cli you can run either
+To get started with the cli you can run
+
 ```
-zqdgr build:cli
-./flux list
-```
-or
-```
-zqdgr run:cli -- list
+go install github.com/juls0730/flux/cmd/flux@latest
 ```
 
 TODO: `go install` instructions and a docker image (sowwy)
@@ -76,7 +75,9 @@ flux.json is the configuration file for a project, it contains the name of the p
 - [Docker](https://docs.docker.com/get-docker/) (daemon only)
 
 ## Contributing
+
 Found a bug, or have something you think would make Flux better? Submit an issue or pull request.
 
 ## License
+
 Flux is licensed with the MIT license

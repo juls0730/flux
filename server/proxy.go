@@ -50,7 +50,7 @@ func NewDeploymentProxy(deployment *Deployment, head *Container) (*DeploymentPro
 	}
 
 	if containerJSON.NetworkSettings.IPAddress == "" {
-		return nil, fmt.Errorf("No IP address found for container %s", head.ContainerID[0:12])
+		return nil, fmt.Errorf("No IP address found for container %s", head.ContainerID[:12])
 	}
 
 	containerUrl, err := url.Parse(fmt.Sprintf("http://%s:%d", containerJSON.NetworkSettings.IPAddress, deployment.Port))

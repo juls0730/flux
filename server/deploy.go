@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 
-	"github.com/juls0730/fluxd/pkg"
+	"github.com/juls0730/flux/pkg"
 )
 
 var (
@@ -98,84 +98,16 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	app := Flux.appManager.GetApp(projectConfig.Name)
 
 	if app == nil {
-		app = &App{
-			Name: projectConfig.Name,
-		}
-		log.Printf("Creating deployment %s...\n", app.Name)
-
-		container, err := CreateDockerContainer(r.Context(), imageName, projectPath, projectConfig)
-		if err != nil || container == nil {
-			log.Printf("Failed to create container: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		deployment, err := CreateDeployment(*container, projectConfig.Port, projectConfig.Url, s.db)
-		app.Deployment = deployment
+		app, err = CreateApp(r.Context(), imageName, projectPath, projectConfig)
 		if err != nil {
-			log.Printf("Failed to create deployment: %v\n", err)
+			log.Printf("Failed to create app: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-
-		if appInsertStmt == nil {
-			appInsertStmt, err = s.db.Prepare("INSERT INTO apps (name, deployment_id) VALUES ($1, $2) RETURNING id, name, deployment_id")
-			if err != nil {
-				log.Printf("Failed to prepare statement: %v\n", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// create app in the database
-		err = appInsertStmt.QueryRow(projectConfig.Name, deployment.ID).Scan(&app.ID, &app.Name, &app.DeploymentID)
-		if err != nil {
-			log.Printf("Failed to insert app: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		err = deployment.Start(r.Context())
-		if err != nil {
-			log.Printf("Failed to start deployment: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		var headContainer *Container
-		for _, container := range deployment.Containers {
-			if container.Head {
-				headContainer = &container
-			}
-		}
-
-		deployment.Proxy, err = NewDeploymentProxy(&deployment, headContainer)
-		if err != nil {
-			log.Printf("Failed to create deployment proxy: %v\n", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		Flux.proxy.AddDeployment(&deployment)
-
-		Flux.appManager.AddApp(app.Name, app)
 	} else {
-		log.Printf("Upgrading deployment %s...\n", app.Name)
-
-		// if deploy is not started, start it
-		deploymentStatus, err := app.Deployment.Status(r.Context())
-		if deploymentStatus != "running" || err != nil {
-			err = app.Deployment.Start(r.Context())
-			if err != nil {
-				log.Printf("Failed to start deployment: %v\n", err)
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-
-		err = app.Deployment.Upgrade(r.Context(), projectConfig, imageName, projectPath)
+		err = app.Upgrade(r.Context(), projectConfig, imageName, projectPath)
 		if err != nil {
-			log.Printf("Failed to upgrade deployment: %v\n", err)
+			log.Printf("Failed to upgrade deployment: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -212,6 +144,17 @@ func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	if app.Deployment.Proxy == nil {
+		var headContainer *Container
+		for _, container := range app.Deployment.Containers {
+			if container.Head {
+				headContainer = &container
+			}
+		}
+
+		app.Deployment.Proxy, _ = NewDeploymentProxy(&app.Deployment, headContainer)
 	}
 
 	w.WriteHeader(http.StatusOK)

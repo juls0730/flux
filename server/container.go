@@ -15,7 +15,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/joho/godotenv"
-	"github.com/juls0730/fluxd/pkg"
+	"github.com/juls0730/flux/pkg"
 )
 
 var dockerClient *client.Client
@@ -45,7 +45,7 @@ func init() {
 	}
 }
 
-func CreateVolume(ctx context.Context, name string) (vol *Volume, err error) {
+func CreateDockerVolume(ctx context.Context, name string) (vol *Volume, err error) {
 	dockerVolume, err := dockerClient.VolumeCreate(ctx, volume.CreateOptions{
 		Driver:     "local",
 		DriverOpts: map[string]string{},
@@ -86,7 +86,7 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 		}
 	}
 
-	vol, err := CreateVolume(ctx, fmt.Sprintf("flux_%s-volume", projectConfig.Name))
+	vol, err := CreateDockerVolume(ctx, fmt.Sprintf("flux_%s-volume", projectConfig.Name))
 
 	log.Printf("Creating container %s...\n", containerName)
 	resp, err := dockerClient.ContainerCreate(ctx, &container.Config{
@@ -175,6 +175,15 @@ func (c *Container) Remove(ctx context.Context) error {
 
 func (c *Container) Wait(ctx context.Context, port uint16) error {
 	return WaitForDockerContainer(ctx, string(c.ContainerID[:]), port)
+}
+
+func (c *Container) Status(ctx context.Context) (string, error) {
+	containerJSON, err := dockerClient.ContainerInspect(ctx, string(c.ContainerID[:]))
+	if err != nil {
+		return "", err
+	}
+
+	return containerJSON.State.Status, nil
 }
 
 // RemoveContainer stops and removes a container, but be warned that this will not remove the container from the database

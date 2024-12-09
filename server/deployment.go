@@ -5,11 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
-	"sync"
 
-	"github.com/juls0730/fluxd/pkg"
+	"github.com/juls0730/flux/pkg"
 )
 
 var (
@@ -19,166 +16,12 @@ var (
 	updateVolumeStmt     *sql.Stmt
 )
 
-type AppManager struct {
-	sync.Map
-}
-
-type App struct {
-	ID           int64      `json:"id,omitempty"`
-	Deployment   Deployment `json:"-"`
-	Name         string     `json:"name,omitempty"`
-	DeploymentID int64      `json:"deployment_id,omitempty"`
-}
-
-func (app *App) Remove(ctx context.Context) error {
-	err := app.Deployment.Remove(ctx)
-	if err != nil {
-		log.Printf("Failed to remove deployment: %v\n", err)
-		return err
-	}
-
-	_, err = Flux.db.Exec("DELETE FROM apps WHERE id = ?", app.ID)
-	if err != nil {
-		log.Printf("Failed to delete app: %v\n", err)
-		return err
-	}
-
-	projectPath := filepath.Join(Flux.rootDir, "apps", app.Name)
-	err = os.RemoveAll(projectPath)
-	if err != nil {
-		return fmt.Errorf("Failed to remove project directory: %v", err)
-	}
-
-	return nil
-}
-
 type Deployment struct {
 	ID         int64            `json:"id"`
 	Containers []Container      `json:"-"`
 	Proxy      *DeploymentProxy `json:"-"`
 	URL        string           `json:"url"`
 	Port       uint16           `json:"port"`
-}
-
-func (am *AppManager) GetApp(name string) *App {
-	app, exists := am.Load(name)
-	if !exists {
-		return nil
-	}
-
-	return app.(*App)
-}
-
-func (am *AppManager) GetAllApps() []*App {
-	var apps []*App
-	am.Range(func(key, value interface{}) bool {
-		if app, ok := value.(*App); ok {
-			apps = append(apps, app)
-		}
-		return true
-	})
-	return apps
-}
-
-func (am *AppManager) AddApp(name string, app *App) {
-	am.Store(name, app)
-}
-
-func (am *AppManager) DeleteApp(name string) error {
-	app := am.GetApp(name)
-	if app == nil {
-		return fmt.Errorf("App not found")
-	}
-
-	err := app.Remove(context.Background())
-	if err != nil {
-		return err
-	}
-
-	am.Delete(name)
-
-	return nil
-}
-
-func (am *AppManager) Init(db *sql.DB) {
-	log.Printf("Initializing deployments...\n")
-
-	if db == nil {
-		log.Panicf("DB is nil")
-	}
-
-	rows, err := db.Query("SELECT id, name, deployment_id FROM apps")
-	if err != nil {
-		log.Printf("Failed to query apps: %v\n", err)
-		return
-	}
-	defer rows.Close()
-
-	var apps []App
-	for rows.Next() {
-		var app App
-		if err := rows.Scan(&app.ID, &app.Name, &app.DeploymentID); err != nil {
-			log.Printf("Failed to scan app: %v\n", err)
-			return
-		}
-		apps = append(apps, app)
-	}
-
-	for _, app := range apps {
-		var deployment Deployment
-		var headContainer *Container
-		db.QueryRow("SELECT id, url, port FROM deployments WHERE id = ?", app.DeploymentID).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
-		deployment.Containers = make([]Container, 0)
-
-		rows, err = db.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
-		if err != nil {
-			log.Printf("Failed to query containers: %v\n", err)
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var container Container
-			var containerIDString string
-			rows.Scan(&container.ID, &containerIDString, &container.DeploymentID, &container.Head)
-			container.Deployment = &deployment
-			copy(container.ContainerID[:], containerIDString)
-
-			if container.Head {
-				headContainer = &container
-			}
-
-			deployment.Containers = append(deployment.Containers, container)
-		}
-
-		for i, container := range deployment.Containers {
-			var volumes []Volume
-			rows, err := db.Query("SELECT id, volume_id, container_id FROM volumes WHERE container_id = ?", container.ID)
-			if err != nil {
-				log.Printf("Failed to query volumes: %v\n", err)
-				return
-			}
-			defer rows.Close()
-
-			for rows.Next() {
-				var volume Volume
-				rows.Scan(&volume.ID, &volume.VolumeID, &volume.ContainerID)
-				volumes = append(volumes, volume)
-			}
-
-			deployment.Containers[i].Volumes = volumes
-		}
-
-		deployment.Proxy, err = NewDeploymentProxy(&deployment, headContainer)
-		if err != nil {
-			log.Printf("Failed to create deployment proxy: %v\n", err)
-			return
-		}
-
-		app.Deployment = deployment
-
-		am.AddApp(app.Name, &app)
-	}
 }
 
 // Creates a deployment and containers in the database
@@ -301,7 +144,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	copy(container.ContainerID[:], containerIDString)
 	deployment.Containers = append(deployment.Containers, container)
 
-	log.Printf("Starting container %s...\n", container.ContainerID[:])
+	log.Printf("Starting container %s...\n", container.ContainerID[:12])
 	err = container.Start(ctx)
 	if err != nil {
 		log.Printf("Failed to start container: %v\n", err)
@@ -313,26 +156,8 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
-	tx, err := Flux.db.Begin()
-	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
-		return err
-	}
-
-	if _, err := tx.Exec("UPDATE deployments SET url = ?, port = ? WHERE id = ?", projectConfig.Url, projectConfig.Port, deployment.ID); err != nil {
+	if _, err := Flux.db.Exec("UPDATE deployments SET url = ?, port = ? WHERE id = ?", projectConfig.Url, projectConfig.Port, deployment.ID); err != nil {
 		log.Printf("Failed to update deployment: %v\n", err)
-		tx.Rollback()
-		return err
-	}
-
-	if _, err := tx.Exec("UPDATE apps SET deployment_id = ? WHERE name = ?", deployment.ID, projectConfig.Name); err != nil {
-		log.Printf("Failed to update app: %v\n", err)
-		tx.Rollback()
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
 		return err
 	}
 
@@ -344,7 +169,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
-	tx, err = Flux.db.Begin()
+	tx, err := Flux.db.Begin()
 	if err != nil {
 		log.Printf("Failed to begin transaction: %v\n", err)
 		return err
@@ -354,7 +179,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	var oldContainers []*Container
 	for _, container := range deployment.Containers {
 		if existingContainers[string(container.ContainerID[:])] {
-			log.Printf("Deleting container from db: %s\n", container.ContainerID[0:12])
+			log.Printf("Deleting container from db: %s\n", container.ContainerID[:12])
 
 			_, err = tx.Exec("DELETE FROM containers WHERE id = ?", container.ID)
 			oldContainers = append(oldContainers, &container)
@@ -391,16 +216,6 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	Flux.proxy.AddDeployment(deployment)
 
 	return nil
-}
-
-func arrayContains(arr []string, str string) bool {
-	for _, a := range arr {
-		if a == str {
-			return true
-		}
-	}
-
-	return false
 }
 
 func (d *Deployment) Remove(ctx context.Context) error {
@@ -445,15 +260,6 @@ func (d *Deployment) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (c *Container) GetStatus(ctx context.Context) (string, error) {
-	containerJSON, err := dockerClient.ContainerInspect(ctx, string(c.ContainerID[:]))
-	if err != nil {
-		return "", err
-	}
-
-	return containerJSON.State.Status, nil
-}
-
 func (d *Deployment) Status(ctx context.Context) (string, error) {
 	var status string
 	if d == nil {
@@ -467,7 +273,7 @@ func (d *Deployment) Status(ctx context.Context) (string, error) {
 	}
 
 	for _, container := range d.Containers {
-		containerStatus, err := container.GetStatus(ctx)
+		containerStatus, err := container.Status(ctx)
 		if err != nil {
 			log.Printf("Failed to get container status: %v\n", err)
 			return "", err

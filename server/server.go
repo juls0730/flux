@@ -14,7 +14,7 @@ import (
 
 	_ "embed"
 
-	"github.com/juls0730/fluxd/pkg"
+	"github.com/juls0730/flux/pkg"
 	_ "github.com/mattn/go-sqlite3"
 )
 
