@@ -3,6 +3,7 @@ package server
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -14,6 +15,8 @@ import (
 
 	_ "embed"
 
+	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/client"
 	"github.com/juls0730/flux/pkg"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -37,25 +40,28 @@ type FluxServerConfig struct {
 }
 
 type FluxServer struct {
-	config     FluxServerConfig
-	db         *sql.DB
-	proxy      *Proxy
-	rootDir    string
-	appManager *AppManager
+	config       FluxServerConfig
+	db           *sql.DB
+	proxy        *Proxy
+	rootDir      string
+	appManager   *AppManager
+	dockerClient *client.Client
 }
 
 func NewServer() *FluxServer {
+	Flux = new(FluxServer)
+
 	var serverConfig FluxServerConfig
 
-	rootDir := os.Getenv("FLUXD_ROOT_DIR")
-	if rootDir == "" {
-		rootDir = "/var/fluxd"
+	Flux.rootDir = os.Getenv("FLUXD_ROOT_DIR")
+	if Flux.rootDir == "" {
+		Flux.rootDir = "/var/fluxd"
 	}
 
 	// parse config, if it doesnt exist, create it and use the default config
-	configPath := filepath.Join(rootDir, "config.json")
+	configPath := filepath.Join(Flux.rootDir, "config.json")
 	if _, err := os.Stat(configPath); err != nil {
-		if err := os.MkdirAll(rootDir, 0755); err != nil {
+		if err := os.MkdirAll(Flux.rootDir, 0755); err != nil {
 			log.Fatalf("Failed to create fluxd directory: %v\n", err)
 		}
 
@@ -79,28 +85,47 @@ func NewServer() *FluxServer {
 		log.Fatalf("Failed to parse config file: %v\n", err)
 	}
 
-	if err := os.MkdirAll(filepath.Join(rootDir, "apps"), 0755); err != nil {
+	Flux.config = serverConfig
+
+	Flux.dockerClient, err = client.NewClientWithOpts(client.FromEnv)
+	if err != nil {
+		log.Fatalf("Failed to create docker client: %v\n", err)
+	}
+
+	log.Printf("Pulling builder image %s, this may take a while...\n", serverConfig.Builder)
+
+	events, err := Flux.dockerClient.ImagePull(context.Background(), fmt.Sprintf("%s:latest", serverConfig.Builder), image.PullOptions{})
+	if err != nil {
+		log.Fatalf("Failed to pull builder image: %v\n", err)
+	}
+
+	// wait for the iamge to be pulled
+	io.Copy(io.Discard, events)
+
+	log.Printf("Successfully pulled builder image %s\n", serverConfig.Builder)
+
+	if err := os.MkdirAll(filepath.Join(Flux.rootDir, "apps"), 0755); err != nil {
 		log.Fatalf("Failed to create apps directory: %v\n", err)
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(rootDir, "fluxd.db"))
+	Flux.db, err = sql.Open("sqlite3", filepath.Join(Flux.rootDir, "fluxd.db"))
 	if err != nil {
 		log.Fatalf("Failed to open database: %v\n", err)
 	}
 
-	_, err = db.Exec(string(schemaBytes))
+	_, err = Flux.db.Exec(string(schemaBytes))
 	if err != nil {
 		log.Fatalf("Failed to create database schema: %v\n", err)
 	}
 
-	appManager := new(AppManager)
-	appManager.Init(db)
+	Flux.appManager = new(AppManager)
+	Flux.appManager.Init()
 
-	proxy := &Proxy{}
+	Flux.proxy = &Proxy{}
 
-	appManager.Range(func(key, value interface{}) bool {
+	Flux.appManager.Range(func(key, value interface{}) bool {
 		app := value.(*App)
-		proxy.AddDeployment(&app.Deployment)
+		Flux.proxy.AddDeployment(&app.Deployment)
 		return true
 	})
 
@@ -111,18 +136,10 @@ func NewServer() *FluxServer {
 
 	go func() {
 		log.Printf("Proxy server starting on http://127.0.0.1:%s\n", port)
-		if err := http.ListenAndServe(fmt.Sprintf(":%s", port), proxy); err != nil && err != http.ErrServerClosed {
+		if err := http.ListenAndServe(fmt.Sprintf(":%s", port), Flux.proxy); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Proxy server error: %v", err)
 		}
 	}()
-
-	Flux = &FluxServer{
-		config:     serverConfig,
-		db:         db,
-		proxy:      proxy,
-		appManager: appManager,
-		rootDir:    rootDir,
-	}
 
 	return Flux
 }

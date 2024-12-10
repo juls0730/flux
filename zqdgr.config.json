@@ -5,10 +5,10 @@
     "author": "juls0730",
     "license": "MIT",
     "scripts": {
-        "build:daemon": "go build -o fluxd cmd/daemon/main.go",
-        "build:cli": "go build -o flux cmd/cli/main.go",
-        "run:daemon": "go run cmd/daemon/main.go",
-        "run:cli": "go run cmd/cli/main.go"
+        "build:daemon": "go build -o fluxd cmd/fluxd/main.go",
+        "build:cli": "go build -o flux cmd/flux/main.go",
+        "run:daemon": "go run cmd/fluxd/main.go",
+        "run:cli": "go run cmd/flux/main.go"
     },
     "pattern": "**/*.go",
     "excluded_dirs": []

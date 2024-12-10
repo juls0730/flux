@@ -1,78 +1,116 @@
 # Flux
 
-Flux is a lightweight self-hosted pseudo-paas for golang web apps that emphasizes simplicity and speed. Flux is built on top of [Buildpacks](https://buildpacks.io/) and [Docker](https://docs.docker.com/get-docker/). It is designed on top of blue-green deployments designed with the "set it and forget it" principle in mind.
+Flux is a lightweight self-hosted pseudo-PaaS for hosting Golang web apps with ease. Built on top of [Buildpacks](https://buildpacks.io/) and [Docker](https://docs.docker.com/get-docker/), Flux simplifies the deployment process with a focus on similicity, speed, and reliability.
 
-(I'll make this better later school starts in 30 minutes LMAO)
+## Features
 
-## Usage
-
-To get started you'll want [ZQDGR](https://github.com/juls0730/zqdgr), and you can start the daemon either with:
-
-```
-zqdgr build:daemon
-sudo ./fluxd
-```
-
-or with
-
-```
-FLUXD_ROOT_DIR=$PWD/fluxdd zqdgr run:daemon
-```
-
-To get started with the cli you can run
-
-```
-go install github.com/juls0730/flux/cmd/flux@latest
-```
-
-TODO: `go install` instructions and a docker image (sowwy)
-
-### Daemon
-
-The daemon is a HTTP server that listens for incoming HTTP requests. It handles deploying new apps and managing their containers.
-
-To run the daemon, simply run `fluxd` in the root directory of this repository. The daemon will listen on port 5647, and the reverse proxy will listen on port 7465, but is configurable with the environment variable `FLUXD_PROXY_PORT`. Once you deploy an app, you must point the domain to the reverse proxy (make sure the Host header is sent).
-
-#### Configuration
-
-The daemon will look for a `config.json` in ~/.config/flux, all this file contains is the builder to use for building the app's image, by default this is `paketobuildpacks/builder-jammy-tiny`.
-
-### CLI
-
-The CLI is a command-line interface for interacting with the daemon.
-
-```
-flux <command>
-```
-
-The following commands are available:
-
-- `init`: Initialize a new project
-- `deploy`: Deploy an app
-- `start`: Start a deployed app (apps are automatically started when deployed)
-- `stop`: Stop a deployed app
-- `delete`: Delete a deployed app
-- `list`: List all deployed apps
-
-#### Configuration
-
-The CLI will look for a `config.json` in ~/.config/flux, all this file contains is the URL of the daemon, by default this is http://127.0.0.1:5647 but for most real use cases, this will be a server.
-
-#### flux.json
-
-flux.json is the configuration file for a project, it contains the name of the project, the URL it should listen to, and the port it should listen to. You can also specify an env file and environment variables to set. All the available options are shown below:
-
-- `name`: The name of the project
-- `url`: The URL the project should listen to
-- `port`: The port the web server is listening on
-- `env_file`: The path to an env file to load environment variables from (relative to the project directory)
-- `environment`: An array of environment variables to set
+- **Blue-Green Deployments**: Deploy new versions of your app without downtime
+- **Simplify Deployment**: Flux takes care of the deployment process, so you can focus on writing your app
+- **Flexible Configuration**: Easily configure your app with `flux.json`
+- **Automatic Container Management**: Steamline your app with automatic container management
 
 ## Dependencies
 
 - [Go](https://golang.org/dl/)
+- [ZQDGR](https://github.com/juls0730/zqdgr)
 - [Buildpacks](https://buildpacks.io/) (daemon only)
 - [Docker](https://docs.docker.com/get-docker/) (daemon only)
+
+## Intallation
+
+### Daemon
+
+To install and start the Flux daemon using ZQDGR, run the following command:
+
+```bash
+# method 1
+zqdgr build:daemon
+sudo ./fluxd
+
+# method 2
+FLUXD_ROOT_DIR=$PWD/fluxdd zqdgr run:daemon
+```
+
+### CLI
+
+Install the CLI using the following command:
+
+```bash
+go install github.com/juls0730/flux/cmd/flux@latest
+```
+
+## Configuration
+
+### Daemon
+
+Flux daemon looks for a confgiuration file in `/var/fluxd/config.json` but can be configured by setting `$FLUXD_ROOT_DIR` to the directory where you want all fluxd files to be stored.
+
+```json
+{
+  "builder": "paketobuildpacks/builder-jammy-tiny"
+}
+```
+
+- `builder`: The buildpack builder to use (default: `paketobuildpacks/builder-jammy-tiny`)
+
+#### Daemon Settings
+
+- **Default port**: 5647 (Daemon server)
+- **Reverse Proxy Port**: 7465 (configurable via `FLUXD_PROXY_PORT` environment variable)
+
+### CLI
+
+The CLI looks for a configuration file in `~/.config/flux/config.json`:
+
+```json
+{
+  "daemon_url": "http://127.0.0.1:5647"
+}
+```
+
+- `daemon_url`: The URL of the daemon to connect to (default: `http://127.0.0.1:5647`)
+
+### Commands
+
+```bash
+Flux <command>
+```
+
+Available commands:
+
+- `init`: Initialize a new project
+- `deploy`: Deploy an application
+- `start`: Start an application
+- `stop`: Stop an application
+- `delete`: Delete an application
+- `list`: View application logs
+
+### Project Configuration (`flux.json`)
+
+flux.json is the configuration file in the root of your proejct that defines deployment settings:
+
+```json
+{
+  "name": "my-app",
+  "url": "myapp.example.com",
+  "port": 8080,
+  "env_file": ".env",
+  "environment": ["DEBUG=true"]
+}
+```
+
+#### Configuration Options
+
+- `name`: The name of the project
+- `url`: Domain for the application
+- `port`: Web server's listening port
+- `env_file`: Path to environment variable file
+- `environment`: Additional environment variables
+
+## Deployment Notes
+
+- After deploying an app, point your domain to the Flux reverse proxy
+- Ensure the Host header is sent with your requests
 
 ## Contributing
 

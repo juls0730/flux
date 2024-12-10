@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -14,7 +13,7 @@ import (
 
 type App struct {
 	ID           int64      `json:"id,omitempty"`
-	Deployment   Deployment `json:"-"`
+	Deployment   Deployment `json:"deployment,omitempty"`
 	Name         string     `json:"name,omitempty"`
 	DeploymentID int64      `json:"deployment_id,omitempty"`
 }
@@ -161,14 +160,14 @@ func (am *AppManager) DeleteApp(name string) error {
 	return nil
 }
 
-func (am *AppManager) Init(db *sql.DB) {
+func (am *AppManager) Init() {
 	log.Printf("Initializing deployments...\n")
 
-	if db == nil {
+	if Flux.db == nil {
 		log.Panicf("DB is nil")
 	}
 
-	rows, err := db.Query("SELECT id, name, deployment_id FROM apps")
+	rows, err := Flux.db.Query("SELECT id, name, deployment_id FROM apps")
 	if err != nil {
 		log.Printf("Failed to query apps: %v\n", err)
 		return
@@ -188,10 +187,10 @@ func (am *AppManager) Init(db *sql.DB) {
 	for _, app := range apps {
 		var deployment Deployment
 		var headContainer *Container
-		db.QueryRow("SELECT id, url, port FROM deployments WHERE id = ?", app.DeploymentID).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
+		Flux.db.QueryRow("SELECT id, url, port FROM deployments WHERE id = ?", app.DeploymentID).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
 		deployment.Containers = make([]Container, 0)
 
-		rows, err = db.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
+		rows, err = Flux.db.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
 		if err != nil {
 			log.Printf("Failed to query containers: %v\n", err)
 			return
@@ -214,7 +213,7 @@ func (am *AppManager) Init(db *sql.DB) {
 
 		for i, container := range deployment.Containers {
 			var volumes []Volume
-			rows, err := db.Query("SELECT id, volume_id, container_id FROM volumes WHERE container_id = ?", container.ID)
+			rows, err := Flux.db.Query("SELECT id, volume_id, container_id FROM volumes WHERE container_id = ?", container.ID)
 			if err != nil {
 				log.Printf("Failed to query volumes: %v\n", err)
 				return

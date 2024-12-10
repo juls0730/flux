@@ -13,12 +13,9 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/docker/client"
 	"github.com/joho/godotenv"
 	"github.com/juls0730/flux/pkg"
 )
-
-var dockerClient *client.Client
 
 type Volume struct {
 	ID          int64  `json:"id"`
@@ -27,26 +24,16 @@ type Volume struct {
 }
 
 type Container struct {
-	ID           int64 `json:"id"`
-	Head         bool  `json:"head"` // if the container is the head of the deployment
-	Deployment   *Deployment
-	Volumes      []Volume `json:"volumes"`
-	ContainerID  [64]byte `json:"container_id"`
-	DeploymentID int64    `json:"deployment_id"`
-}
-
-func init() {
-	log.Printf("Initializing Docker client...\n")
-
-	var err error
-	dockerClient, err = client.NewClientWithOpts(client.FromEnv)
-	if err != nil {
-		log.Fatalf("Failed to create Docker client: %v", err)
-	}
+	ID           int64       `json:"id"`
+	Head         bool        `json:"head"` // if the container is the head of the deployment
+	Deployment   *Deployment `json:"-"`
+	Volumes      []Volume    `json:"volumes"`
+	ContainerID  [64]byte    `json:"container_id"`
+	DeploymentID int64       `json:"deployment_id"`
 }
 
 func CreateDockerVolume(ctx context.Context, name string) (vol *Volume, err error) {
-	dockerVolume, err := dockerClient.VolumeCreate(ctx, volume.CreateOptions{
+	dockerVolume, err := Flux.dockerClient.VolumeCreate(ctx, volume.CreateOptions{
 		Driver:     "local",
 		DriverOpts: map[string]string{},
 		Name:       name,
@@ -89,7 +76,7 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 	vol, err := CreateDockerVolume(ctx, fmt.Sprintf("flux_%s-volume", projectConfig.Name))
 
 	log.Printf("Creating container %s...\n", containerName)
-	resp, err := dockerClient.ContainerCreate(ctx, &container.Config{
+	resp, err := Flux.dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
 		Volumes: map[string]struct{}{
@@ -126,11 +113,11 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 }
 
 func (c *Container) Start(ctx context.Context) error {
-	return dockerClient.ContainerStart(ctx, string(c.ContainerID[:]), container.StartOptions{})
+	return Flux.dockerClient.ContainerStart(ctx, string(c.ContainerID[:]), container.StartOptions{})
 }
 
 func (c *Container) Stop(ctx context.Context) error {
-	return dockerClient.ContainerStop(ctx, string(c.ContainerID[:]), container.StopOptions{})
+	return Flux.dockerClient.ContainerStop(ctx, string(c.ContainerID[:]), container.StopOptions{})
 }
 
 func (c *Container) Remove(ctx context.Context) error {
@@ -178,7 +165,7 @@ func (c *Container) Wait(ctx context.Context, port uint16) error {
 }
 
 func (c *Container) Status(ctx context.Context) (string, error) {
-	containerJSON, err := dockerClient.ContainerInspect(ctx, string(c.ContainerID[:]))
+	containerJSON, err := Flux.dockerClient.ContainerInspect(ctx, string(c.ContainerID[:]))
 	if err != nil {
 		return "", err
 	}
@@ -188,11 +175,11 @@ func (c *Container) Status(ctx context.Context) (string, error) {
 
 // RemoveContainer stops and removes a container, but be warned that this will not remove the container from the database
 func RemoveDockerContainer(ctx context.Context, containerID string) error {
-	if err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
+	if err := Flux.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{}); err != nil {
 		return fmt.Errorf("Failed to stop container (%s): %v", containerID[:12], err)
 	}
 
-	if err := dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
+	if err := Flux.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{}); err != nil {
 		return fmt.Errorf("Failed to remove container (%s): %v", containerID[:12], err)
 	}
 
@@ -210,7 +197,7 @@ func WaitForDockerContainer(ctx context.Context, containerID string, containerPo
 			return fmt.Errorf("container failed to become ready in time")
 
 		default:
-			containerJSON, err := dockerClient.ContainerInspect(ctx, containerID)
+			containerJSON, err := Flux.dockerClient.ContainerInspect(ctx, containerID)
 			if err != nil {
 				return err
 			}
@@ -229,7 +216,7 @@ func WaitForDockerContainer(ctx context.Context, containerID string, containerPo
 
 func GracefullyRemoveDockerContainer(ctx context.Context, containerID string) error {
 	timeout := 30
-	err := dockerClient.ContainerStop(ctx, containerID, container.StopOptions{
+	err := Flux.dockerClient.ContainerStop(ctx, containerID, container.StopOptions{
 		Timeout: &timeout,
 	})
 	if err != nil {
@@ -242,15 +229,15 @@ func GracefullyRemoveDockerContainer(ctx context.Context, containerID string) er
 	for {
 		select {
 		case <-ctx.Done():
-			return dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
+			return Flux.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
 		default:
-			containerJSON, err := dockerClient.ContainerInspect(ctx, containerID)
+			containerJSON, err := Flux.dockerClient.ContainerInspect(ctx, containerID)
 			if err != nil {
 				return err
 			}
 
 			if !containerJSON.State.Running {
-				return dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
+				return Flux.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{})
 			}
 
 			time.Sleep(time.Second)
@@ -261,7 +248,7 @@ func GracefullyRemoveDockerContainer(ctx context.Context, containerID string) er
 func RemoveVolume(ctx context.Context, volumeID string) error {
 	log.Printf("Removed volume %s\n", volumeID)
 
-	if err := dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
+	if err := Flux.dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
 		return fmt.Errorf("Failed to remove volume (%s): %v", volumeID, err)
 	}
 
@@ -269,7 +256,7 @@ func RemoveVolume(ctx context.Context, volumeID string) error {
 }
 
 func findExistingDockerContainers(ctx context.Context, containerPrefix string) (map[string]bool, error) {
-	containers, err := dockerClient.ContainerList(ctx, container.ListOptions{
+	containers, err := Flux.dockerClient.ContainerList(ctx, container.ListOptions{
 		All: true,
 	})
 	if err != nil {

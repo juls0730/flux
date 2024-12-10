@@ -44,7 +44,11 @@ type DeploymentProxy struct {
 }
 
 func NewDeploymentProxy(deployment *Deployment, head *Container) (*DeploymentProxy, error) {
-	containerJSON, err := dockerClient.ContainerInspect(context.Background(), string(head.ContainerID[:]))
+	if deployment == nil {
+		return nil, fmt.Errorf("Deployment is nil")
+	}
+
+	containerJSON, err := Flux.dockerClient.ContainerInspect(context.Background(), string(head.ContainerID[:]))
 	if err != nil {
 		return nil, err
 	}

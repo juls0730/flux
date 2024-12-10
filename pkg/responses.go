@@ -15,3 +15,9 @@ type Compression struct {
 type Info struct {
 	Compression Compression `json:"compression"`
 }
+
+type DeploymentEvent struct {
+	Stage   string `json:"stage"`
+	Message string `json:"message"`
+	Error   string `json:"error,omitempty"`
+}

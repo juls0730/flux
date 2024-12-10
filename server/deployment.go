@@ -18,7 +18,7 @@ var (
 
 type Deployment struct {
 	ID         int64            `json:"id"`
-	Containers []Container      `json:"-"`
+	Containers []Container      `json:"containers,omitempty"`
 	Proxy      *DeploymentProxy `json:"-"`
 	URL        string           `json:"url"`
 	Port       uint16           `json:"port"`

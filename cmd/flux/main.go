@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/briandowns/spinner"
@@ -177,18 +178,18 @@ func getProjectName(command string, args []string) (string, error) {
 
 	if len(args) == 0 {
 		if _, err := os.Stat("flux.json"); err != nil {
-			return "", fmt.Errorf("Usage: flux %[1]s <app name>, or run flux %[1]s in the project directory\n", command)
+			return "", fmt.Errorf("Usage: flux %[1]s <app name>, or run flux %[1]s in the project directory", command)
 		}
 
 		fluxConfigFile, err := os.Open("flux.json")
 		if err != nil {
-			return "", fmt.Errorf("Failed to open flux.json: %v\n", err)
+			return "", fmt.Errorf("Failed to open flux.json: %v", err)
 		}
 		defer fluxConfigFile.Close()
 
 		var config pkg.ProjectConfig
 		if err := json.NewDecoder(fluxConfigFile).Decode(&config); err != nil {
-			return "", fmt.Errorf("Failed to decode flux.json: %v\n", err)
+			return "", fmt.Errorf("Failed to decode flux.json: %v", err)
 		}
 
 		projectName = config.Name
@@ -199,8 +200,83 @@ func getProjectName(command string, args []string) (string, error) {
 	return projectName, nil
 }
 
+type CustomSpinnerWriter struct {
+	currentSpinnerMsg string
+	lock              sync.Mutex
+}
+
+func (w *CustomSpinnerWriter) Write(p []byte) (n int, err error) {
+	w.lock.Lock()
+	defer w.lock.Unlock()
+
+	n, err = os.Stdout.Write(p)
+	if err != nil {
+		return n, err
+	}
+
+	w.currentSpinnerMsg = string(p)
+
+	return len(p), nil
+}
+
+type CustomStdout struct {
+	spinner *CustomSpinnerWriter
+	lock    sync.Mutex
+}
+
+func (w *CustomStdout) Write(p []byte) (n int, err error) {
+	w.lock.Lock()
+	defer w.lock.Unlock()
+
+	n, err = os.Stdout.Write([]byte(fmt.Sprintf("\033[2K\r%s", p)))
+	if err != nil {
+		return n, err
+	}
+
+	nn, err := os.Stdout.Write([]byte(w.spinner.currentSpinnerMsg))
+	if err != nil {
+		return n, err
+	}
+
+	n = nn + n
+
+	return n, nil
+}
+
+func (w *CustomStdout) Printf(format string, a ...interface{}) (n int, err error) {
+	str := fmt.Sprintf(format, a...)
+	return w.Write([]byte(str))
+}
+
+var helpStr = `Usage:
+  flux <command>
+
+Available Commands:
+  init        Initialize a new project
+  deploy      Deploy a new version of the app
+  stop        Stop a container
+  start       Start a container
+  delete      Delete a container
+  list        List all containers
+
+Flags:
+  -h, --help   help for flux
+
+Use "flux <command> --help" for more information about a command.`
+
 func runCommand(command string, args []string, config Config, info pkg.Info) error {
-	loadingSpinner := spinner.New(spinner.CharSets[14], 100*time.Millisecond)
+	seekingHelp := false
+	if len(args) > 0 && (args[len(args)-1] == "--help" || args[len(args)-1] == "-h") {
+		seekingHelp = true
+		args = args[:len(args)-1]
+	}
+
+	spinnerWriter := CustomSpinnerWriter{
+		currentSpinnerMsg: "",
+		lock:              sync.Mutex{},
+	}
+
+	loadingSpinner := spinner.New(spinner.CharSets[14], 100*time.Millisecond, spinner.WithWriter(&spinnerWriter))
 	defer func() {
 		if loadingSpinner.Active() {
 			loadingSpinner.Stop()
@@ -220,8 +296,16 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 	switch command {
 	case "deploy":
+		if seekingHelp {
+			fmt.Println(`Usage:
+			  flux deploy
+			  
+			Flux will deploy the app in the current directory, and start routing traffic to it.`)
+			return nil
+		}
+
 		if _, err := os.Stat("flux.json"); err != nil {
-			return fmt.Errorf("No flux.json found, please run flux init first\n")
+			return fmt.Errorf("No flux.json found, please run flux init first")
 		}
 
 		loadingSpinner.Suffix = " Deploying"
@@ -229,7 +313,7 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 		buf, err := compressDirectory(info.Compression)
 		if err != nil {
-			return fmt.Errorf("Failed to compress directory: %v\n", err)
+			return fmt.Errorf("Failed to compress directory: %v", err)
 		}
 
 		body := &bytes.Buffer{}
@@ -237,54 +321,96 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 		configPart, err := writer.CreateFormFile("config", "flux.json")
 
 		if err != nil {
-			return fmt.Errorf("Failed to create config part: %v\n", err)
+			return fmt.Errorf("Failed to create config part: %v", err)
 		}
 
 		fluxConfigFile, err := os.Open("flux.json")
 		if err != nil {
-			return fmt.Errorf("Failed to open flux.json: %v\n", err)
+			return fmt.Errorf("Failed to open flux.json: %v", err)
 		}
 		defer fluxConfigFile.Close()
 
 		if _, err := io.Copy(configPart, fluxConfigFile); err != nil {
-			return fmt.Errorf("Failed to write config part: %v\n", err)
+			return fmt.Errorf("Failed to write config part: %v", err)
 		}
 
 		codePart, err := writer.CreateFormFile("code", "code.tar.gz")
 		if err != nil {
-			return fmt.Errorf("Failed to create code part: %v\n", err)
+			return fmt.Errorf("Failed to create code part: %v", err)
 		}
 
 		if _, err := codePart.Write(buf); err != nil {
-			return fmt.Errorf("Failed to write code part: %v\n", err)
+			return fmt.Errorf("Failed to write code part: %v", err)
 		}
 
 		if err := writer.Close(); err != nil {
-			return fmt.Errorf("Failed to close writer: %v\n", err)
+			return fmt.Errorf("Failed to close writer: %v", err)
 		}
 
-		resp, err := http.Post(config.DeamonURL+"/deploy", "multipart/form-data; boundary="+writer.Boundary(), body)
+		req, err := http.NewRequest("POST", config.DeamonURL+"/deploy", body)
+		req.Header.Set("Content-Type", writer.FormDataContentType())
+
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			return fmt.Errorf("Failed to send request: %v\n", err)
+			return fmt.Errorf("Failed to send request: %v", err)
 		}
 		defer resp.Body.Close()
+
+		customWriter := &CustomStdout{
+			spinner: &spinnerWriter,
+			lock:    sync.Mutex{},
+		}
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.HasPrefix(line, "data: ") {
+				var event pkg.DeploymentEvent
+				if err := json.Unmarshal([]byte(line[6:]), &event); err == nil {
+					switch event.Stage {
+					case "complete":
+						loadingSpinner.Stop()
+						var deploymentResponse struct {
+							App pkg.App `json:"app"`
+						}
+						if err := json.Unmarshal([]byte(event.Message), &deploymentResponse); err != nil {
+							return fmt.Errorf("Failed to parse deployment response: %v", err)
+						}
+
+						fmt.Printf("App %s deployed successfully!\n", deploymentResponse.App.Name)
+
+						return nil
+					case "cmd_output":
+						customWriter.Printf("... %s\n", event.Message)
+					case "error":
+						loadingSpinner.Stop()
+						return fmt.Errorf("Deployment failed: %s\n", event.Error)
+					default:
+						customWriter.Printf("%s\n", event.Message)
+					}
+				}
+			}
+		}
 
 		if resp.StatusCode != http.StatusOK {
 			responseBody, err := io.ReadAll(resp.Body)
 			if err != nil {
-				return fmt.Errorf("error reading response body: %v\n", err)
+				return fmt.Errorf("error reading response body: %v", err)
 			}
 
-			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
-				responseBody = responseBody[:len(responseBody)-1]
-			}
+			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
-			return fmt.Errorf("Deploy failed: %s\n", responseBody)
+			return fmt.Errorf("Deploy failed: %s", responseBody)
+		}
+	case "stop":
+		if seekingHelp {
+			fmt.Println(`Usage:
+			  flux stop
+			  
+			Flux will stop the deployment of the app in the current directory.`)
+			return nil
 		}
 
-		loadingSpinner.Stop()
-		fmt.Println("Deployed successfully!")
-	case "stop":
 		projectName, err := getProjectName(command, args)
 		if err != nil {
 			return err
@@ -292,25 +418,31 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 		req, err := http.Post(config.DeamonURL+"/stop/"+projectName, "application/json", nil)
 		if err != nil {
-			return fmt.Errorf("Failed to stop app: %v\n", err)
+			return fmt.Errorf("Failed to stop app: %v", err)
 		}
 		defer req.Body.Close()
 
 		if req.StatusCode != http.StatusOK {
 			responseBody, err := io.ReadAll(req.Body)
 			if err != nil {
-				return fmt.Errorf("error reading response body: %v\n", err)
+				return fmt.Errorf("error reading response body: %v", err)
 			}
 
-			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
-				responseBody = responseBody[:len(responseBody)-1]
-			}
+			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
-			return fmt.Errorf("Stop failed: %s\n", responseBody)
+			return fmt.Errorf("Stop failed: %s", responseBody)
 		}
 
 		fmt.Printf("Successfully stopped %s\n", projectName)
 	case "start":
+		if seekingHelp {
+			fmt.Println(`Usage:
+			  flux start
+			  
+			Flux will start the deployment of the app in the current directory.`)
+			return nil
+		}
+
 		projectName, err := getProjectName(command, args)
 		if err != nil {
 			return err
@@ -318,25 +450,35 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 		req, err := http.Post(config.DeamonURL+"/start/"+projectName, "application/json", nil)
 		if err != nil {
-			return fmt.Errorf("Failed to start app: %v\n", err)
+			return fmt.Errorf("Failed to start app: %v", err)
 		}
 		defer req.Body.Close()
 
 		if req.StatusCode != http.StatusOK {
 			responseBody, err := io.ReadAll(req.Body)
 			if err != nil {
-				return fmt.Errorf("error reading response body: %v\n", err)
+				return fmt.Errorf("error reading response body: %v", err)
 			}
 
-			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
-				responseBody = responseBody[:len(responseBody)-1]
-			}
+			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
-			return fmt.Errorf("Start failed: %s\n", responseBody)
+			return fmt.Errorf("Start failed: %s", responseBody)
 		}
 
 		fmt.Printf("Successfully started %s\n", projectName)
 	case "delete":
+		if seekingHelp {
+			fmt.Println(`Usage:
+			  flux delete [project-name | all]
+
+			Options:
+			  project-name: The name of the project to delete
+			  all: Delete all projects
+			  
+			Flux will delete the deployment of the app in the current directory or the specified project.`)
+			return nil
+		}
+
 		if len(args) == 1 {
 			if args[0] == "all" {
 				var response string
@@ -360,7 +502,7 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 				req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments", nil)
 				if err != nil {
-					return fmt.Errorf("Failed to delete deployments: %v\n", err)
+					return fmt.Errorf("Failed to delete deployments: %v", err)
 				}
 				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
@@ -371,12 +513,10 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 				if resp.StatusCode != http.StatusOK {
 					responseBody, err := io.ReadAll(resp.Body)
 					if err != nil {
-						return fmt.Errorf("error reading response body: %v\n", err)
+						return fmt.Errorf("error reading response body: %v", err)
 					}
 
-					if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
-						responseBody = responseBody[:len(responseBody)-1]
-					}
+					responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
 					return fmt.Errorf("delete failed: %s", responseBody)
 				}
@@ -417,15 +557,21 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 				return fmt.Errorf("error reading response body: %v", err)
 			}
 
-			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
-				responseBody = responseBody[:len(responseBody)-1]
-			}
+			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
 			return fmt.Errorf("delete failed: %s", responseBody)
 		}
 
 		fmt.Printf("Successfully deleted %s\n", projectName)
 	case "list":
+		if seekingHelp {
+			fmt.Println(`Usage:
+			  flux list
+
+			Flux will list all the apps in the daemon.`)
+			return nil
+		}
+
 		resp, err := http.Get(config.DeamonURL + "/apps")
 		if err != nil {
 			return fmt.Errorf("failed to get apps: %v", err)
@@ -437,9 +583,7 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 				return fmt.Errorf("error reading response body: %v", err)
 			}
 
-			if len(responseBody) > 0 && responseBody[len(responseBody)-1] == '\n' {
-				responseBody = responseBody[:len(responseBody)-1]
-			}
+			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
 			return fmt.Errorf("list failed: %s", responseBody)
 		}
@@ -458,6 +602,17 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 			fmt.Printf("%s (%s)\n", app.Name, app.DeploymentStatus)
 		}
 	case "init":
+		if seekingHelp {
+			fmt.Println(`Usage:
+			  flux init [project-name]
+			  
+			Options:
+			  project-name: The name of the project to initialize
+			  
+			Flux will initialize a new project in the current directory or the specified project.`)
+			return nil
+		}
+
 		var projectConfig pkg.ProjectConfig
 
 		var response string
@@ -498,7 +653,7 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 		fmt.Printf("Successfully initialized project %s\n", projectConfig.Name)
 	default:
-		return fmt.Errorf("unknown command: %s", command)
+		return fmt.Errorf("unknown command: %s\n%s", command, helpStr)
 	}
 
 	return nil
@@ -506,8 +661,13 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: flux <command>")
+		fmt.Println(helpStr)
 		os.Exit(1)
+	}
+
+	if os.Args[1] == "--help" || os.Args[1] == "-h" {
+		fmt.Println(helpStr)
+		os.Exit(0)
 	}
 
 	if _, err := os.Stat(filepath.Join(configPath, "config.json")); err != nil {
