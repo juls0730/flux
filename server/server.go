@@ -123,12 +123,6 @@ func NewServer() *FluxServer {
 
 	Flux.proxy = &Proxy{}
 
-	Flux.appManager.Range(func(key, value interface{}) bool {
-		app := value.(*App)
-		Flux.proxy.AddDeployment(&app.Deployment)
-		return true
-	})
-
 	port := os.Getenv("FLUXD_PROXY_PORT")
 	if port == "" {
 		port = "7465"

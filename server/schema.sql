@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS containers (
 CREATE TABLE IF NOT EXISTS volumes (
     id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
     volume_id TEXT NOT NULL,
+    mountpoint TEXT NOT NULL,
     container_id INTEGER NOT NULL,
     FOREIGN KEY(container_id) REFERENCES containers(id)
 );

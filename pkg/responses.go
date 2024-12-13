@@ -17,7 +17,5 @@ type Info struct {
 }
 
 type DeploymentEvent struct {
-	Stage   string `json:"stage"`
 	Message string `json:"message"`
-	Error   string `json:"error,omitempty"`
 }

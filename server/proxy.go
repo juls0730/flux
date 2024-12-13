@@ -16,7 +16,15 @@ type Proxy struct {
 	deployments sync.Map
 }
 
+func (p *Proxy) RemoveDeployment(deployment *Deployment) {
+	p.deployments.Delete(deployment.URL)
+}
+
 func (p *Proxy) AddDeployment(deployment *Deployment) {
+	if deployment.Containers == nil {
+		panic("containers is nil")
+	}
+
 	log.Printf("Adding deployment %s\n", deployment.URL)
 	p.deployments.Store(deployment.URL, deployment)
 }
@@ -37,24 +45,23 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type DeploymentProxy struct {
 	deployment     *Deployment
-	currentHead    *Container
 	proxy          *httputil.ReverseProxy
 	gracePeriod    time.Duration
 	activeRequests int64
 }
 
-func NewDeploymentProxy(deployment *Deployment, head *Container) (*DeploymentProxy, error) {
+func (deployment *Deployment) NewDeploymentProxy() (*DeploymentProxy, error) {
 	if deployment == nil {
-		return nil, fmt.Errorf("Deployment is nil")
+		return nil, fmt.Errorf("deployment is nil")
 	}
 
-	containerJSON, err := Flux.dockerClient.ContainerInspect(context.Background(), string(head.ContainerID[:]))
+	containerJSON, err := Flux.dockerClient.ContainerInspect(context.Background(), string(deployment.Head.ContainerID[:]))
 	if err != nil {
 		return nil, err
 	}
 
 	if containerJSON.NetworkSettings.IPAddress == "" {
-		return nil, fmt.Errorf("No IP address found for container %s", head.ContainerID[:12])
+		return nil, fmt.Errorf("no IP address found for container %s", deployment.Head.ContainerID[:12])
 	}
 
 	containerUrl, err := url.Parse(fmt.Sprintf("http://%s:%d", containerJSON.NetworkSettings.IPAddress, deployment.Port))
@@ -80,7 +87,6 @@ func NewDeploymentProxy(deployment *Deployment, head *Container) (*DeploymentPro
 
 	return &DeploymentProxy{
 		deployment:     deployment,
-		currentHead:    head,
 		proxy:          proxy,
 		gracePeriod:    time.Second * 30,
 		activeRequests: 0,
@@ -91,21 +97,17 @@ func (dp *DeploymentProxy) GracefulShutdown(oldContainers []*Container) {
 	ctx, cancel := context.WithTimeout(context.Background(), dp.gracePeriod)
 	defer cancel()
 
-	// Create a channel to signal when wait group is done
-	for {
+	done := false
+	for !done {
 		select {
 		case <-ctx.Done():
-			break
+			done = true
 		default:
 			if atomic.LoadInt64(&dp.activeRequests) == 0 {
-				break
+				done = true
 			}
 
 			time.Sleep(time.Second)
-		}
-
-		if atomic.LoadInt64(&dp.activeRequests) == 0 || ctx.Err() != nil {
-			break
 		}
 	}
 

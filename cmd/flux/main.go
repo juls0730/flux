@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/agnivade/levenshtein"
 	"github.com/briandowns/spinner"
 	"github.com/juls0730/flux/pkg"
 )
@@ -178,18 +179,18 @@ func getProjectName(command string, args []string) (string, error) {
 
 	if len(args) == 0 {
 		if _, err := os.Stat("flux.json"); err != nil {
-			return "", fmt.Errorf("Usage: flux %[1]s <app name>, or run flux %[1]s in the project directory", command)
+			return "", fmt.Errorf("usage: flux %[1]s <app name>, or run flux %[1]s in the project directory", command)
 		}
 
 		fluxConfigFile, err := os.Open("flux.json")
 		if err != nil {
-			return "", fmt.Errorf("Failed to open flux.json: %v", err)
+			return "", fmt.Errorf("failed to open flux.json: %v", err)
 		}
 		defer fluxConfigFile.Close()
 
 		var config pkg.ProjectConfig
 		if err := json.NewDecoder(fluxConfigFile).Decode(&config); err != nil {
-			return "", fmt.Errorf("Failed to decode flux.json: %v", err)
+			return "", fmt.Errorf("failed to decode flux.json: %v", err)
 		}
 
 		projectName = config.Name
@@ -248,6 +249,394 @@ func (w *CustomStdout) Printf(format string, a ...interface{}) (n int, err error
 	return w.Write([]byte(str))
 }
 
+func DeployCommand(seekingHelp bool, config Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *CustomSpinnerWriter, args []string) error {
+	if seekingHelp {
+		fmt.Println(`Usage:
+		  flux deploy
+		  
+		Flux will deploy the app in the current directory, and start routing traffic to it.`)
+		return nil
+	}
+
+	if _, err := os.Stat("flux.json"); err != nil {
+		return fmt.Errorf("no flux.json found, please run flux init first")
+	}
+
+	loadingSpinner.Suffix = " Deploying"
+	loadingSpinner.Start()
+
+	buf, err := compressDirectory(info.Compression)
+	if err != nil {
+		return fmt.Errorf("failed to compress directory: %v", err)
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	configPart, err := writer.CreateFormFile("config", "flux.json")
+
+	if err != nil {
+		return fmt.Errorf("failed to create config part: %v", err)
+	}
+
+	fluxConfigFile, err := os.Open("flux.json")
+	if err != nil {
+		return fmt.Errorf("failed to open flux.json: %v", err)
+	}
+	defer fluxConfigFile.Close()
+
+	if _, err := io.Copy(configPart, fluxConfigFile); err != nil {
+		return fmt.Errorf("failed to write config part: %v", err)
+	}
+
+	codePart, err := writer.CreateFormFile("code", "code.tar.gz")
+	if err != nil {
+		return fmt.Errorf("failed to create code part: %v", err)
+	}
+
+	if _, err := codePart.Write(buf); err != nil {
+		return fmt.Errorf("failed to write code part: %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("failed to close writer: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", config.DeamonURL+"/deploy", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	customWriter := &CustomStdout{
+		spinner: spinnerWriter,
+		lock:    sync.Mutex{},
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	var event string
+	var data pkg.DeploymentEvent
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data: ") {
+			if err := json.Unmarshal([]byte(line[6:]), &data); err != nil {
+				return fmt.Errorf("failed to parse deployment event: %v", err)
+			}
+
+			switch event {
+			case "complete":
+				loadingSpinner.Stop()
+				var deploymentResponse struct {
+					App pkg.App `json:"app"`
+				}
+				if err := json.Unmarshal([]byte(data.Message), &deploymentResponse); err != nil {
+					return fmt.Errorf("failed to parse deployment response: %v", err)
+				}
+				fmt.Printf("App %s deployed successfully!\n", deploymentResponse.App.Name)
+				return nil
+			case "cmd_output":
+				customWriter.Printf("... %s\n", data.Message)
+			case "error":
+				loadingSpinner.Stop()
+				return fmt.Errorf("deployment failed: %s", data.Message)
+			default:
+				customWriter.Printf("%s\n", data.Message)
+			}
+			event = ""
+		} else if strings.HasPrefix(line, "event: ") {
+			event = strings.TrimPrefix(line, "event: ")
+		}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+
+		responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
+
+		return fmt.Errorf("deploy failed: %s", responseBody)
+	}
+
+	return nil
+}
+
+func StopCommand(seekingHelp bool, config Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *CustomSpinnerWriter, args []string) error {
+	if seekingHelp {
+		fmt.Println(`Usage:
+		  flux stop
+		  
+		Flux will stop the deployment of the app in the current directory.`)
+		return nil
+	}
+
+	projectName, err := getProjectName("stop", args)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.Post(config.DeamonURL+"/stop/"+projectName, "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("failed to stop app: %v", err)
+	}
+	defer req.Body.Close()
+
+	if req.StatusCode != http.StatusOK {
+		responseBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+
+		responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
+
+		return fmt.Errorf("stop failed: %s", responseBody)
+	}
+
+	fmt.Printf("Successfully stopped %s\n", projectName)
+	return nil
+}
+
+func StartCommand(seekingHelp bool, config Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *CustomSpinnerWriter, args []string) error {
+	if seekingHelp {
+		fmt.Println(`Usage:
+		  flux start
+		  
+		Flux will start the deployment of the app in the current directory.`)
+		return nil
+	}
+
+	projectName, err := getProjectName("start", args)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.Post(config.DeamonURL+"/start/"+projectName, "application/json", nil)
+	if err != nil {
+		return fmt.Errorf("failed to start app: %v", err)
+	}
+	defer req.Body.Close()
+
+	if req.StatusCode != http.StatusOK {
+		responseBody, err := io.ReadAll(req.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+
+		responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
+
+		return fmt.Errorf("start failed: %s", responseBody)
+	}
+
+	fmt.Printf("Successfully started %s\n", projectName)
+
+	return nil
+}
+
+func DeleteCommand(seekingHelp bool, config Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *CustomSpinnerWriter, args []string) error {
+	if seekingHelp {
+		fmt.Println(`Usage:
+		  flux delete [project-name | all]
+
+		Options:
+		  project-name: The name of the project to delete
+		  all: Delete all projects
+		  
+		Flux will delete the deployment of the app in the current directory or the specified project.`)
+		return nil
+	}
+
+	if len(args) == 1 {
+		if args[0] == "all" {
+			var response string
+			fmt.Print("Are you sure you want to delete all projects? this will delete all volumes and containers associated and cannot be undone. \n[y/N] ")
+			fmt.Scanln(&response)
+
+			if strings.ToLower(response) != "y" {
+				fmt.Println("Aborting...")
+				return nil
+			}
+
+			response = ""
+
+			fmt.Printf("Are you really sure you want to delete all projects? \n[y/N] ")
+			fmt.Scanln(&response)
+
+			if strings.ToLower(response) != "y" {
+				fmt.Println("Aborting...")
+				return nil
+			}
+
+			req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments", nil)
+			if err != nil {
+				return fmt.Errorf("failed to delete deployments: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("failed to delete deployments: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				responseBody, err := io.ReadAll(resp.Body)
+				if err != nil {
+					return fmt.Errorf("error reading response body: %v", err)
+				}
+
+				responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
+
+				return fmt.Errorf("delete failed: %s", responseBody)
+			}
+
+			fmt.Printf("Successfully deleted all projects\n")
+			return nil
+		}
+	}
+
+	projectName, err := getProjectName("delete", args)
+	if err != nil {
+		return err
+	}
+
+	// ask for confirmation
+	fmt.Printf("Are you sure you want to delete %s? this will delete all volumes and containers associated with the deployment, and cannot be undone. \n[y/N] ", projectName)
+	var response string
+	fmt.Scanln(&response)
+
+	if strings.ToLower(response) != "y" {
+		fmt.Println("Aborting...")
+		return nil
+	}
+
+	req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments/"+projectName, nil)
+	if err != nil {
+		return fmt.Errorf("failed to delete app: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to delete app: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+
+		responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
+
+		return fmt.Errorf("delete failed: %s", responseBody)
+	}
+
+	fmt.Printf("Successfully deleted %s\n", projectName)
+
+	return nil
+}
+
+func ListCommand(seekingHelp bool, config Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *CustomSpinnerWriter, args []string) error {
+	if seekingHelp {
+		fmt.Println(`Usage:
+		  flux list
+
+		Flux will list all the apps in the daemon.`)
+		return nil
+	}
+
+	resp, err := http.Get(config.DeamonURL + "/apps")
+	if err != nil {
+		return fmt.Errorf("failed to get apps: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response body: %v", err)
+		}
+
+		responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
+
+		return fmt.Errorf("list failed: %s", responseBody)
+	}
+
+	var apps []pkg.App
+	if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
+		return fmt.Errorf("failed to decode apps: %v", err)
+	}
+
+	if len(apps) == 0 {
+		fmt.Println("No apps found")
+		return nil
+	}
+
+	for _, app := range apps {
+		fmt.Printf("%s (%s)\n", app.Name, app.DeploymentStatus)
+	}
+
+	return nil
+}
+
+func InitCommand(seekingHelp bool, config Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *CustomSpinnerWriter, args []string) error {
+	if seekingHelp {
+		fmt.Println(`Usage:
+		  flux init [project-name]
+		  
+		Options:
+		  project-name: The name of the project to initialize
+		  
+		Flux will initialize a new project in the current directory or the specified project.`)
+		return nil
+	}
+
+	var projectConfig pkg.ProjectConfig
+
+	var response string
+	if len(args) > 1 {
+		response = args[0]
+	} else {
+		fmt.Println("What is the name of your project?")
+		fmt.Scanln(&response)
+	}
+
+	projectConfig.Name = response
+
+	fmt.Println("What URL should your project listen to?")
+	fmt.Scanln(&response)
+	if strings.HasPrefix(response, "http") {
+		response = strings.TrimPrefix(response, "http://")
+		response = strings.TrimPrefix(response, "https://")
+	}
+
+	response = strings.Split(response, "/")[0]
+
+	projectConfig.Url = response
+
+	fmt.Println("What port does your project listen to?")
+	fmt.Scanln(&response)
+	port, err := strconv.ParseUint(response, 10, 16)
+	projectConfig.Port = uint16(port)
+	if err != nil || projectConfig.Port < 1 || projectConfig.Port > 65535 {
+		return fmt.Errorf("that doesnt look like a valid port, try a number between 1 and 65535")
+	}
+
+	configBytes, err := json.MarshalIndent(projectConfig, "", "    ")
+	if err != nil {
+		return fmt.Errorf("failed to parse project config: %v", err)
+	}
+
+	os.WriteFile("flux.json", configBytes, 0644)
+
+	fmt.Printf("Successfully initialized project %s\n", projectConfig.Name)
+
+	return nil
+}
+
 var helpStr = `Usage:
   flux <command>
 
@@ -264,7 +653,21 @@ Flags:
 
 Use "flux <command> --help" for more information about a command.`
 
-func runCommand(command string, args []string, config Config, info pkg.Info) error {
+var maxDistance = 3
+
+type CommandHandler struct {
+	commands map[string]func(bool, Config, pkg.Info, *spinner.Spinner, *CustomSpinnerWriter, []string) error
+}
+
+func (h *CommandHandler) RegisterCmd(name string, handler func(bool, Config, pkg.Info, *spinner.Spinner, *CustomSpinnerWriter, []string) error) {
+	h.commands[name] = handler
+}
+
+func runCommand(command string, args []string, config Config, info pkg.Info, cmdHandler CommandHandler, try int) error {
+	if try == 2 {
+		return fmt.Errorf("Unknown command: %s", command)
+	}
+
 	seekingHelp := false
 	if len(args) > 0 && (args[len(args)-1] == "--help" || args[len(args)-1] == "-h") {
 		seekingHelp = true
@@ -294,369 +697,42 @@ func runCommand(command string, args []string, config Config, info pkg.Info) err
 		os.Exit(0)
 	}()
 
-	switch command {
-	case "deploy":
-		if seekingHelp {
-			fmt.Println(`Usage:
-			  flux deploy
-			  
-			Flux will deploy the app in the current directory, and start routing traffic to it.`)
-			return nil
-		}
-
-		if _, err := os.Stat("flux.json"); err != nil {
-			return fmt.Errorf("No flux.json found, please run flux init first")
-		}
-
-		loadingSpinner.Suffix = " Deploying"
-		loadingSpinner.Start()
-
-		buf, err := compressDirectory(info.Compression)
-		if err != nil {
-			return fmt.Errorf("Failed to compress directory: %v", err)
-		}
-
-		body := &bytes.Buffer{}
-		writer := multipart.NewWriter(body)
-		configPart, err := writer.CreateFormFile("config", "flux.json")
-
-		if err != nil {
-			return fmt.Errorf("Failed to create config part: %v", err)
-		}
-
-		fluxConfigFile, err := os.Open("flux.json")
-		if err != nil {
-			return fmt.Errorf("Failed to open flux.json: %v", err)
-		}
-		defer fluxConfigFile.Close()
-
-		if _, err := io.Copy(configPart, fluxConfigFile); err != nil {
-			return fmt.Errorf("Failed to write config part: %v", err)
-		}
-
-		codePart, err := writer.CreateFormFile("code", "code.tar.gz")
-		if err != nil {
-			return fmt.Errorf("Failed to create code part: %v", err)
-		}
-
-		if _, err := codePart.Write(buf); err != nil {
-			return fmt.Errorf("Failed to write code part: %v", err)
-		}
-
-		if err := writer.Close(); err != nil {
-			return fmt.Errorf("Failed to close writer: %v", err)
-		}
-
-		req, err := http.NewRequest("POST", config.DeamonURL+"/deploy", body)
-		req.Header.Set("Content-Type", writer.FormDataContentType())
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("Failed to send request: %v", err)
-		}
-		defer resp.Body.Close()
-
-		customWriter := &CustomStdout{
-			spinner: &spinnerWriter,
-			lock:    sync.Mutex{},
-		}
-
-		scanner := bufio.NewScanner(resp.Body)
-		for scanner.Scan() {
-			line := scanner.Text()
-			if strings.HasPrefix(line, "data: ") {
-				var event pkg.DeploymentEvent
-				if err := json.Unmarshal([]byte(line[6:]), &event); err == nil {
-					switch event.Stage {
-					case "complete":
-						loadingSpinner.Stop()
-						var deploymentResponse struct {
-							App pkg.App `json:"app"`
-						}
-						if err := json.Unmarshal([]byte(event.Message), &deploymentResponse); err != nil {
-							return fmt.Errorf("Failed to parse deployment response: %v", err)
-						}
-
-						fmt.Printf("App %s deployed successfully!\n", deploymentResponse.App.Name)
-
-						return nil
-					case "cmd_output":
-						customWriter.Printf("... %s\n", event.Message)
-					case "error":
-						loadingSpinner.Stop()
-						return fmt.Errorf("Deployment failed: %s\n", event.Error)
-					default:
-						customWriter.Printf("%s\n", event.Message)
-					}
-				}
-			}
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			responseBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("error reading response body: %v", err)
-			}
-
-			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
-
-			return fmt.Errorf("Deploy failed: %s", responseBody)
-		}
-	case "stop":
-		if seekingHelp {
-			fmt.Println(`Usage:
-			  flux stop
-			  
-			Flux will stop the deployment of the app in the current directory.`)
-			return nil
-		}
-
-		projectName, err := getProjectName(command, args)
-		if err != nil {
-			return err
-		}
-
-		req, err := http.Post(config.DeamonURL+"/stop/"+projectName, "application/json", nil)
-		if err != nil {
-			return fmt.Errorf("Failed to stop app: %v", err)
-		}
-		defer req.Body.Close()
-
-		if req.StatusCode != http.StatusOK {
-			responseBody, err := io.ReadAll(req.Body)
-			if err != nil {
-				return fmt.Errorf("error reading response body: %v", err)
-			}
-
-			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
-
-			return fmt.Errorf("Stop failed: %s", responseBody)
-		}
-
-		fmt.Printf("Successfully stopped %s\n", projectName)
-	case "start":
-		if seekingHelp {
-			fmt.Println(`Usage:
-			  flux start
-			  
-			Flux will start the deployment of the app in the current directory.`)
-			return nil
-		}
-
-		projectName, err := getProjectName(command, args)
-		if err != nil {
-			return err
-		}
-
-		req, err := http.Post(config.DeamonURL+"/start/"+projectName, "application/json", nil)
-		if err != nil {
-			return fmt.Errorf("Failed to start app: %v", err)
-		}
-		defer req.Body.Close()
-
-		if req.StatusCode != http.StatusOK {
-			responseBody, err := io.ReadAll(req.Body)
-			if err != nil {
-				return fmt.Errorf("error reading response body: %v", err)
-			}
-
-			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
-
-			return fmt.Errorf("Start failed: %s", responseBody)
-		}
-
-		fmt.Printf("Successfully started %s\n", projectName)
-	case "delete":
-		if seekingHelp {
-			fmt.Println(`Usage:
-			  flux delete [project-name | all]
-
-			Options:
-			  project-name: The name of the project to delete
-			  all: Delete all projects
-			  
-			Flux will delete the deployment of the app in the current directory or the specified project.`)
-			return nil
-		}
-
-		if len(args) == 1 {
-			if args[0] == "all" {
-				var response string
-				fmt.Print("Are you sure you want to delete all projects? this will delete all volumes and containers associated and cannot be undone. \n[y/N] ")
-				fmt.Scanln(&response)
-
-				if strings.ToLower(response) != "y" {
-					fmt.Println("Aborting...")
-					return nil
-				}
-
-				response = ""
-
-				fmt.Printf("Are you really sure you want to delete all projects? \n[y/N] ")
-				fmt.Scanln(&response)
-
-				if strings.ToLower(response) != "y" {
-					fmt.Println("Aborting...")
-					return nil
-				}
-
-				req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments", nil)
-				if err != nil {
-					return fmt.Errorf("Failed to delete deployments: %v", err)
-				}
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					return fmt.Errorf("failed to delete deployments: %v", err)
-				}
-				defer resp.Body.Close()
-
-				if resp.StatusCode != http.StatusOK {
-					responseBody, err := io.ReadAll(resp.Body)
-					if err != nil {
-						return fmt.Errorf("error reading response body: %v", err)
-					}
-
-					responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
-
-					return fmt.Errorf("delete failed: %s", responseBody)
-				}
-
-				fmt.Printf("Successfully deleted all projects\n")
-				return nil
-			}
-		}
-
-		projectName, err := getProjectName(command, args)
-		if err != nil {
-			return err
-		}
-
-		// ask for confirmation
-		fmt.Printf("Are you sure you want to delete %s? this will delete all volumes and containers associated with the deployment, and cannot be undone. \n[y/N] ", projectName)
-		var response string
-		fmt.Scanln(&response)
-
-		if strings.ToLower(response) != "y" {
-			fmt.Println("Aborting...")
-			return nil
-		}
-
-		req, err := http.NewRequest("DELETE", config.DeamonURL+"/deployments/"+projectName, nil)
-		if err != nil {
-			return fmt.Errorf("failed to delete app: %v", err)
-		}
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to delete app: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			responseBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("error reading response body: %v", err)
-			}
-
-			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
-
-			return fmt.Errorf("delete failed: %s", responseBody)
-		}
-
-		fmt.Printf("Successfully deleted %s\n", projectName)
-	case "list":
-		if seekingHelp {
-			fmt.Println(`Usage:
-			  flux list
-
-			Flux will list all the apps in the daemon.`)
-			return nil
-		}
-
-		resp, err := http.Get(config.DeamonURL + "/apps")
-		if err != nil {
-			return fmt.Errorf("failed to get apps: %v", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			responseBody, err := io.ReadAll(resp.Body)
-			if err != nil {
-				return fmt.Errorf("error reading response body: %v", err)
-			}
-
-			responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
-
-			return fmt.Errorf("list failed: %s", responseBody)
-		}
-
-		var apps []pkg.App
-		if err := json.NewDecoder(resp.Body).Decode(&apps); err != nil {
-			return fmt.Errorf("failed to decode apps: %v", err)
-		}
-
-		if len(apps) == 0 {
-			fmt.Println("No apps found")
-			return nil
-		}
-
-		for _, app := range apps {
-			fmt.Printf("%s (%s)\n", app.Name, app.DeploymentStatus)
-		}
-	case "init":
-		if seekingHelp {
-			fmt.Println(`Usage:
-			  flux init [project-name]
-			  
-			Options:
-			  project-name: The name of the project to initialize
-			  
-			Flux will initialize a new project in the current directory or the specified project.`)
-			return nil
-		}
-
-		var projectConfig pkg.ProjectConfig
-
-		var response string
-		if len(args) > 1 {
-			response = args[0]
-		} else {
-			fmt.Println("What is the name of your project?")
-			fmt.Scanln(&response)
-		}
-
-		projectConfig.Name = response
-
-		fmt.Println("What URL should your project listen to?")
-		fmt.Scanln(&response)
-		if strings.HasPrefix(response, "http") {
-			strings.TrimPrefix(response, "http://")
-			strings.TrimPrefix(response, "https://")
-		}
-
-		response = strings.Split(response, "/")[0]
-
-		projectConfig.Url = response
-
-		fmt.Println("What port does your project listen to?")
-		fmt.Scanln(&response)
-		port, err := strconv.ParseUint(response, 10, 16)
-		projectConfig.Port = uint16(port)
-		if err != nil || projectConfig.Port < 1 || projectConfig.Port > 65535 {
-			return fmt.Errorf("That doesnt look like a valid port, try a number between 1 and 65535")
-		}
-
-		configBytes, err := json.MarshalIndent(projectConfig, "", "    ")
-		if err != nil {
-			return fmt.Errorf("failed to parse project config: %v", err)
-		}
-
-		os.WriteFile("flux.json", configBytes, 0644)
-
-		fmt.Printf("Successfully initialized project %s\n", projectConfig.Name)
-	default:
-		return fmt.Errorf("unknown command: %s\n%s", command, helpStr)
+	handler, ok := cmdHandler.commands[command]
+	if ok {
+		return handler(seekingHelp, config, info, loadingSpinner, &spinnerWriter, args)
 	}
 
-	return nil
+	// diff the command against the list of commands and if we find a command that is more than 80% similar, ask if that's what the user meant
+	var closestMatch struct {
+		name  string
+		score int
+	}
+	for cmdName := range cmdHandler.commands {
+		distance := levenshtein.ComputeDistance(cmdName, command)
+
+		if distance <= maxDistance {
+			if closestMatch.name == "" || distance < closestMatch.score {
+				closestMatch.name = cmdName
+				closestMatch.score = distance
+			}
+		}
+	}
+
+	if closestMatch.name == "" {
+		return fmt.Errorf("unknown command: %s", command)
+	}
+
+	var response string
+	fmt.Printf("No command found with the name '%s'. Did you mean '%s'?\n", command, closestMatch.name)
+	fmt.Scanln(&response)
+
+	if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
+		command = closestMatch.name
+	} else {
+		return nil
+	}
+
+	return runCommand(command, args, config, info, cmdHandler, try+1)
 }
 
 func main() {
@@ -720,7 +796,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = runCommand(command, args, config, info)
+	cmdHandler := CommandHandler{
+		commands: make(map[string]func(bool, Config, pkg.Info, *spinner.Spinner, *CustomSpinnerWriter, []string) error),
+	}
+
+	cmdHandler.RegisterCmd("deploy", DeployCommand)
+	cmdHandler.RegisterCmd("stop", StopCommand)
+	cmdHandler.RegisterCmd("start", StartCommand)
+	cmdHandler.RegisterCmd("delete", DeleteCommand)
+	cmdHandler.RegisterCmd("init", InitCommand)
+
+	err = runCommand(command, args, config, info, cmdHandler, 0)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 		os.Exit(1)

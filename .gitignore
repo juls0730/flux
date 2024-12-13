@@ -2,4 +2,4 @@ fluxd
 flux
 !cmd/flux
 !cmd/fluxd
-fluxdd/
+fluxdd*

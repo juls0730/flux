@@ -31,6 +31,9 @@ sudo ./fluxd
 FLUXD_ROOT_DIR=$PWD/fluxdd zqdgr run:daemon
 ```
 
+> [!IMPORTANT]
+> CGO is required to build the daemon due to the use of [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)
+
 ### CLI
 
 Install the CLI using the following command:
