@@ -22,17 +22,62 @@ Flux is a lightweight self-hosted pseudo-PaaS for hosting Golang web apps with e
 
 To install and start the Flux daemon using ZQDGR, run the following command:
 
+> [!IMPORTANT]
+> CGO is required to build the daemon due to the use of [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)
+
+#### Method 1: ZQDGR
+
 ```bash
-# method 1
+go install github.com/juls0730/zqdgr@latest
+
+git clone https://github.com/juls0730/flux.git
+cd flux
+
+# either
 zqdgr build:daemon
 sudo ./fluxd
 
-# method 2
+# or
 FLUXD_ROOT_DIR=$PWD/fluxdd zqdgr run:daemon
 ```
 
-> [!IMPORTANT]
-> CGO is required to build the daemon due to the use of [mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)
+#### Method 2: Docker
+
+```bash
+docker run -d --name fluxd --network host -v /var/run/docker.sock:/var/run/docker.sock -v fluxd-data:/var/fluxd -p 5647:5647 -p 7465:7465 zoeissleeping/fluxd:latest
+```
+
+#### Method 3: Systemd
+
+```bash
+go install github.com/juls0730/zqdgr@latest
+
+git clone https://github.com/juls0730/flux.git
+cd flux
+
+zqdgr build:daemon
+sudo mv fluxd /usr/local/bin/
+
+sudo cat <<EOF > /etc/systemd/system/fluxd.service
+[Unit]
+Description=Flux Daemon
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/fluxd
+WorkingDirectory=/var/fluxd
+User=fluxuser
+Group=fluxgroup
+Restart=always
+Environment=FLUXD_ROOT_DIR=/var/fluxd
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now fluxd
+```
 
 ### CLI
 

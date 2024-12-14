@@ -1,0 +1,16 @@
+services:
+  daemon:
+    build: .
+    container_name: fluxd
+    ports:
+      - "5647:5647"
+      - "7465:7465"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "fluxd-data:/var/fluxd"
+    restart: unless-stopped
+    network_mode: host
+
+volumes:
+  fluxd-data:
+    driver: local

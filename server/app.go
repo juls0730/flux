@@ -3,17 +3,17 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
 
 	"github.com/juls0730/flux/pkg"
+	"go.uber.org/zap"
 )
 
 type App struct {
 	ID           int64       `json:"id,omitempty"`
-	Deployment   *Deployment `json:"deployment,omitempty"`
+	Deployment   *Deployment `json:"-"`
 	Name         string      `json:"name,omitempty"`
 	DeploymentID int64       `json:"deployment_id,omitempty"`
 }
@@ -22,12 +22,12 @@ func CreateApp(ctx context.Context, imageName string, projectPath string, projec
 	app := &App{
 		Name: projectConfig.Name,
 	}
-	log.Printf("Creating deployment %s...\n", app.Name)
+	logger.Debugw("Creating deployment", zap.String("name", app.Name))
 
 	deployment, err := CreateDeployment(projectConfig.Port, projectConfig.Url, Flux.db)
 	app.Deployment = deployment
 	if err != nil {
-		log.Printf("Failed to create deployment: %v", err)
+		logger.Errorw("Failed to create deployment", zap.Error(err))
 		return nil, err
 	}
 
@@ -60,7 +60,7 @@ func CreateApp(ctx context.Context, imageName string, projectPath string, projec
 }
 
 func (app *App) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, imageName string, projectPath string) error {
-	log.Printf("Upgrading deployment %s...\n", app.Name)
+	logger.Debugw("Upgrading deployment", zap.String("name", app.Name))
 
 	// if deploy is not started, start it
 	deploymentStatus, err := app.Deployment.Status(ctx)
@@ -84,15 +84,17 @@ func (app *App) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, im
 }
 
 func (app *App) Remove(ctx context.Context) error {
+	Flux.appManager.RemoveApp(app.Name)
+
 	err := app.Deployment.Remove(ctx)
 	if err != nil {
-		log.Printf("Failed to remove deployment: %v\n", err)
+		logger.Errorw("Failed to remove deployment", zap.Error(err))
 		return err
 	}
 
 	_, err = Flux.db.Exec("DELETE FROM apps WHERE id = ?", app.ID)
 	if err != nil {
-		log.Printf("Failed to delete app: %v\n", err)
+		logger.Errorw("Failed to delete app", zap.Error(err))
 		return err
 	}
 
@@ -129,6 +131,10 @@ func (am *AppManager) GetAllApps() []*App {
 	return apps
 }
 
+func (am *AppManager) RemoveApp(name string) {
+	am.Delete(name)
+}
+
 func (am *AppManager) AddApp(name string, app *App) {
 	if app.Deployment.Containers == nil || app.Deployment.Head == nil || len(app.Deployment.Containers) == 0 {
 		panic("nil containers")
@@ -154,15 +160,15 @@ func (am *AppManager) DeleteApp(name string) error {
 }
 
 func (am *AppManager) Init() {
-	log.Printf("Initializing deployments...\n")
+	logger.Info("Initializing deployments")
 
 	if Flux.db == nil {
-		log.Panicf("DB is nil")
+		logger.Panic("DB is nil")
 	}
 
 	rows, err := Flux.db.Query("SELECT id, name, deployment_id FROM apps")
 	if err != nil {
-		log.Printf("Failed to query apps: %v\n", err)
+		logger.Warnw("Failed to query apps", zap.Error(err))
 		return
 	}
 	defer rows.Close()
@@ -171,7 +177,7 @@ func (am *AppManager) Init() {
 	for rows.Next() {
 		var app App
 		if err := rows.Scan(&app.ID, &app.Name, &app.DeploymentID); err != nil {
-			log.Printf("Failed to scan app: %v\n", err)
+			logger.Warnw("Failed to scan app", zap.Error(err))
 			return
 		}
 		apps = append(apps, app)
@@ -185,7 +191,7 @@ func (am *AppManager) Init() {
 
 		rows, err = Flux.db.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
 		if err != nil {
-			log.Printf("Failed to query containers: %v\n", err)
+			logger.Warnw("Failed to query containers", zap.Error(err))
 			return
 		}
 		defer rows.Close()
@@ -199,7 +205,7 @@ func (am *AppManager) Init() {
 
 			if container.Head {
 				if headContainer != nil {
-					log.Fatalf("Several containers are marked as head")
+					logger.Fatal("Several containers are marked as head")
 				}
 
 				headContainer = &container
@@ -207,7 +213,7 @@ func (am *AppManager) Init() {
 
 			rows, err := Flux.db.Query("SELECT id, volume_id, container_id, mountpoint FROM volumes WHERE container_id = ?", container.ContainerID[:])
 			if err != nil {
-				log.Printf("Failed to query volumes: %v\n", err)
+				logger.Warnw("Failed to query volumes", zap.Error(err))
 				return
 			}
 			defer rows.Close()
@@ -222,7 +228,7 @@ func (am *AppManager) Init() {
 		}
 
 		if headContainer == nil {
-			log.Fatalf("head container is nil!")
+			logger.Fatal("head container is nil!")
 		}
 
 		deployment.Head = headContainer
@@ -231,7 +237,7 @@ func (am *AppManager) Init() {
 
 		status, err := deployment.Status(context.Background())
 		if err != nil {
-			log.Printf("Failed to get deployment status: %v\n", err)
+			logger.Warnw("Failed to get deployment status", zap.Error(err))
 			continue
 		}
 

@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"mime/multipart"
 	"net/http"
 	"os/exec"
 	"sync"
 
 	"github.com/juls0730/flux/pkg"
+	"go.uber.org/zap"
 )
 
 var (
@@ -74,9 +74,9 @@ func (dt *DeploymentLock) CompleteDeployment(appName string) {
 var deploymentLock = NewDeploymentLock()
 
 type DeploymentEvent struct {
-	Stage      string `json:"stage"`
-	Message    string `json:"message"`
-	StatusCode int    `json:"status,omitempty"`
+	Stage      string      `json:"stage"`
+	Message    interface{} `json:"message"`
+	StatusCode int         `json:"status,omitempty"`
 }
 
 func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 
 	err := r.ParseMultipartForm(10 << 30) // 10 GiB
 	if err != nil {
-		log.Printf("Failed to parse multipart form: %v\n", err)
+		logger.Errorw("Failed to parse multipart form", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -105,7 +105,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 
 	var projectConfig pkg.ProjectConfig
 	if err := json.NewDecoder(deployRequest.Config).Decode(&projectConfig); err != nil {
-		log.Printf("Failed to decode config: %v\n", err)
+		logger.Errorw("Failed to decode config", zap.Error(err))
 
 		http.Error(w, "Invalid flux.json", http.StatusBadRequest)
 		return
@@ -118,7 +118,10 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	defer deploymentLock.CompleteDeployment(projectConfig.Name)
+	go func() {
+		<-ctx.Done()
+		deploymentLock.CompleteDeployment(projectConfig.Name)
+	}()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -147,9 +150,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				ev := struct {
-					Message string `json:"message"`
-				}{
+				ev := pkg.DeploymentEvent{
 					Message: event.Message,
 				}
 
@@ -207,11 +208,11 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Deploying project %s to %s\n", projectConfig.Name, projectConfig.Url)
+	logger.Infow("Deploying project", zap.String("name", projectConfig.Name), zap.String("url", projectConfig.Url))
 
 	projectPath, err := s.UploadAppCode(deployRequest.Code, projectConfig)
 	if err != nil {
-		log.Printf("Failed to upload code: %v\n", err)
+		logger.Infow("Failed to upload code", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to upload code: %s", err),
@@ -221,11 +222,11 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Streams the each line of the pipe into the eventChannel, this closes the pipe when the function exits
+	var pipeGroup sync.WaitGroup
+
 	streamPipe := func(pipe io.ReadCloser) {
-		// we need a wait group because otherwise the function *could* exit before the pipe is closed
-		// and wreck havoc on every future request
-		wg.Add(1)
-		defer wg.Done()
+		pipeGroup.Add(1)
+		defer pipeGroup.Done()
 
 		scanner := bufio.NewScanner(pipe)
 		for scanner.Scan() {
@@ -241,11 +242,11 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 				Stage:   "error",
 				Message: fmt.Sprintf("Failed to read pipe: %s", err),
 			}
-			log.Printf("Error reading pipe: %s\n", err)
+			logger.Errorw("Error reading pipe", zap.Error(err))
 		}
 	}
 
-	log.Printf("Preparing project %s...\n", projectConfig.Name)
+	logger.Debugw("Preparing project", zap.String("name", projectConfig.Name))
 	eventChannel <- DeploymentEvent{
 		Stage:   "preparing",
 		Message: "Preparing project",
@@ -255,7 +256,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	prepareCmd.Dir = projectPath
 	cmdOut, err := prepareCmd.StdoutPipe()
 	if err != nil {
-		log.Printf("Failed to get stdout pipe: %v\n", err)
+		logger.Errorw("Failed to get stdout pipe", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to get stdout pipe: %s", err),
@@ -266,7 +267,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	cmdErr, err := prepareCmd.StderrPipe()
 	if err != nil {
-		log.Printf("Failed to get stderr pipe: %v\n", err)
+		logger.Errorw("Failed to get stderr pipe", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to get stderr pipe: %s", err),
@@ -275,12 +276,26 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	err = prepareCmd.Start()
+	if err != nil {
+		logger.Errorw("Failed to prepare project", zap.Error(err))
+		eventChannel <- DeploymentEvent{
+			Stage:      "error",
+			Message:    fmt.Sprintf("Failed to prepare project: %s", err),
+			StatusCode: http.StatusInternalServerError,
+		}
+
+		return
+	}
+
 	go streamPipe(cmdOut)
 	go streamPipe(cmdErr)
 
-	err = prepareCmd.Run()
+	pipeGroup.Wait()
+
+	err = prepareCmd.Wait()
 	if err != nil {
-		log.Printf("Failed to prepare project: %s\n", err)
+		logger.Errorw("Failed to prepare project", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to prepare project: %s", err),
@@ -295,13 +310,13 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		Message: "Building project image",
 	}
 
-	log.Printf("Building image for project %s...\n", projectConfig.Name)
+	logger.Debugw("Building image for project", zap.String("name", projectConfig.Name))
 	imageName := fmt.Sprintf("flux_%s-image", projectConfig.Name)
 	buildCmd := exec.Command("pack", "build", imageName, "--builder", s.config.Builder)
 	buildCmd.Dir = projectPath
 	cmdOut, err = buildCmd.StdoutPipe()
 	if err != nil {
-		log.Printf("Failed to get stdout pipe: %v\n", err)
+		logger.Errorw("Failed to get stdout pipe", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to get stdout pipe: %s", err),
@@ -312,7 +327,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	cmdErr, err = buildCmd.StderrPipe()
 	if err != nil {
-		log.Printf("Failed to get stderr pipe: %v\n", err)
+		logger.Errorw("Failed to get stderr pipe", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to get stderr pipe: %s", err),
@@ -322,12 +337,26 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	err = buildCmd.Start()
+	if err != nil {
+		logger.Errorw("Failed to build image", zap.Error(err))
+		eventChannel <- DeploymentEvent{
+			Stage:      "error",
+			Message:    fmt.Sprintf("Failed to build image: %s", err),
+			StatusCode: http.StatusInternalServerError,
+		}
+
+		return
+	}
+
 	go streamPipe(cmdOut)
 	go streamPipe(cmdErr)
 
-	err = buildCmd.Run()
+	pipeGroup.Wait()
+
+	err = buildCmd.Wait()
 	if err != nil {
-		log.Printf("Failed to build image: %s\n", err)
+		logger.Errorw("Failed to build image", zap.Error(err))
 		eventChannel <- DeploymentEvent{
 			Stage:      "error",
 			Message:    fmt.Sprintf("Failed to build image: %s", err),
@@ -347,7 +376,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	if app == nil {
 		app, err = CreateApp(ctx, imageName, projectPath, projectConfig)
 		if err != nil {
-			log.Printf("Failed to create app: %v", err)
+			logger.Errorw("Failed to create app", zap.Error(err))
 			eventChannel <- DeploymentEvent{
 				Stage:      "error",
 				Message:    fmt.Sprintf("Failed to create app: %s", err),
@@ -359,7 +388,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		err = app.Upgrade(ctx, projectConfig, imageName, projectPath)
 		if err != nil {
-			log.Printf("Failed to upgrade app: %v", err)
+			logger.Errorw("Failed to upgrade app", zap.Error(err))
 			eventChannel <- DeploymentEvent{
 				Stage:      "error",
 				Message:    fmt.Sprintf("Failed to upgrade app: %s", err),
@@ -370,26 +399,12 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	responseJSON, err := json.Marshal(DeployResponse{
-		App: *app,
-	})
-	if err != nil {
-		log.Printf("Failed to marshal deploy response: %v\n", err)
-		eventChannel <- DeploymentEvent{
-			Stage:      "error",
-			Message:    fmt.Sprintf("Failed to marshal deploy response: %s", err),
-			StatusCode: http.StatusInternalServerError,
-		}
-
-		return
-	}
-
 	eventChannel <- DeploymentEvent{
 		Stage:   "complete",
-		Message: string(responseJSON),
+		Message: app,
 	}
 
-	log.Printf("App %s deployed successfully!\n", app.Name)
+	logger.Infow("App deployed successfully", zap.String("name", app.Name))
 }
 
 func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) {
@@ -457,12 +472,12 @@ func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 
-	log.Printf("Deleting deployment %s...\n", name)
+	logger.Debugw("Deleting deployment", zap.String("name", name))
 
 	err := Flux.appManager.DeleteApp(name)
 
 	if err != nil {
-		log.Printf("Failed to delete app: %v\n", err)
+		logger.Errorw("Failed to delete app", zap.Error(err))
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -472,9 +487,9 @@ func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request)
 
 func (s *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
 	for _, app := range Flux.appManager.GetAllApps() {
-		err := app.Remove(r.Context())
+		err := Flux.appManager.DeleteApp(app.Name)
 		if err != nil {
-			log.Printf("Failed to remove app: %v\n", err)
+			logger.Errorw("Failed to remove app", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -485,12 +500,12 @@ func (s *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.
 
 func (s *FluxServer) ListAppsHandler(w http.ResponseWriter, r *http.Request) {
 	// for each app, get the deployment status
-	var apps []*pkg.App
+	var apps []pkg.App
 	for _, app := range Flux.appManager.GetAllApps() {
 		var extApp pkg.App
 		deploymentStatus, err := app.Deployment.Status(r.Context())
 		if err != nil {
-			log.Printf("Failed to get deployment status: %v\n", err)
+			logger.Errorw("Failed to get deployment status", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -499,7 +514,7 @@ func (s *FluxServer) ListAppsHandler(w http.ResponseWriter, r *http.Request) {
 		extApp.Name = app.Name
 		extApp.DeploymentID = app.DeploymentID
 		extApp.DeploymentStatus = deploymentStatus
-		apps = append(apps, &extApp)
+		apps = append(apps, extApp)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

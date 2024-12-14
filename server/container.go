@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/joho/godotenv"
 	"github.com/juls0730/flux/pkg"
+	"go.uber.org/zap"
 )
 
 var (
@@ -49,7 +49,7 @@ func CreateDockerVolume(ctx context.Context) (vol *Volume, err error) {
 		return nil, fmt.Errorf("failed to create volume: %v", err)
 	}
 
-	log.Printf("Volume %s created at %s\n", dockerVolume.Name, dockerVolume.Mountpoint)
+	logger.Debugw("Volume created", zap.String("volume_id", dockerVolume.Name), zap.String("mountpoint", dockerVolume.Mountpoint))
 
 	vol = &Volume{
 		VolumeID: dockerVolume.Name,
@@ -78,7 +78,7 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 		}
 	}
 
-	log.Printf("Creating container %s...\n", containerName)
+	logger.Debugw("Creating container", zap.String("container_id", containerName))
 	resp, err := Flux.dockerClient.ContainerCreate(ctx, &container.Config{
 		Image: imageName,
 		Env:   projectConfig.Environment,
@@ -115,7 +115,7 @@ func CreateDockerContainer(ctx context.Context, imageName, projectPath string, p
 }
 
 func CreateContainer(ctx context.Context, imageName, projectPath string, projectConfig pkg.ProjectConfig, head bool, deployment *Deployment) (c *Container, err error) {
-	log.Printf("Creating container with image %s\n", imageName)
+	logger.Debugw("Creating container with image", zap.String("image", imageName))
 
 	if projectConfig.EnvFile != "" {
 		envBytes, err := os.Open(filepath.Join(projectPath, projectConfig.EnvFile))
@@ -145,7 +145,7 @@ func CreateContainer(ctx context.Context, imageName, projectPath string, project
 	if volumeInsertStmt == nil {
 		volumeInsertStmt, err = Flux.db.Prepare("INSERT INTO volumes (volume_id, mountpoint, container_id) VALUES (?, ?, ?) RETURNING id, volume_id, mountpoint, container_id")
 		if err != nil {
-			log.Printf("Failed to prepare statement: %v\n", err)
+			logger.Errorw("Failed to prepare statement", zap.Error(err))
 			return nil, err
 		}
 	}
@@ -185,7 +185,7 @@ func CreateContainer(ctx context.Context, imageName, projectPath string, project
 
 func (c *Container) Upgrade(ctx context.Context, imageName, projectPath string, projectConfig pkg.ProjectConfig) (*Container, error) {
 	// Create new container with new image
-	log.Printf("Upgrading container %s...\n", c.ContainerID[:12])
+	logger.Debugw("Upgrading container", zap.ByteString("container_id", c.ContainerID[:12]))
 	if c.Volumes == nil {
 		return nil, fmt.Errorf("no volumes found for container %s", c.ContainerID[:12])
 	}
@@ -208,7 +208,7 @@ func (c *Container) Upgrade(ctx context.Context, imageName, projectPath string, 
 	var containerIDString string
 	err = containerInsertStmt.QueryRow(newContainer.ContainerID[:], c.Head, c.Deployment.ID).Scan(&newContainer.ID, &containerIDString, &newContainer.Head, &newContainer.DeploymentID)
 	if err != nil {
-		log.Printf("Failed to insert container: %v\n", err)
+		logger.Errorw("Failed to insert container", zap.Error(err))
 		return nil, err
 	}
 	copy(newContainer.ContainerID[:], containerIDString)
@@ -223,7 +223,7 @@ func (c *Container) Upgrade(ctx context.Context, imageName, projectPath string, 
 	vol = &newContainer.Volumes[0]
 	volumeUpdateStmt.QueryRow(newContainer.ContainerID[:], vol.ID).Scan(&vol.ID, &vol.VolumeID, &vol.Mountpoint, &vol.ContainerID)
 
-	log.Printf("Upgraded container")
+	logger.Debug("Upgraded container")
 
 	return newContainer, nil
 }
@@ -245,7 +245,7 @@ func (c *Container) Remove(ctx context.Context) error {
 
 	tx, err := Flux.db.Begin()
 	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
+		logger.Errorw("Failed to begin transaction", zap.Error(err))
 		return err
 	}
 
@@ -269,7 +269,7 @@ func (c *Container) Remove(ctx context.Context) error {
 	}
 
 	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
+		logger.Errorw("Failed to commit transaction", zap.Error(err))
 		return err
 	}
 
@@ -362,7 +362,7 @@ func GracefullyRemoveDockerContainer(ctx context.Context, containerID string) er
 }
 
 func RemoveVolume(ctx context.Context, volumeID string) error {
-	log.Printf("Removed volume %s\n", volumeID)
+	logger.Debugw("Removed volume", zap.String("volume_id", volumeID))
 
 	if err := Flux.dockerClient.VolumeRemove(ctx, volumeID, true); err != nil {
 		return fmt.Errorf("failed to remove volume (%s): %v", volumeID, err)

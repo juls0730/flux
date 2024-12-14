@@ -17,5 +17,5 @@ type Info struct {
 }
 
 type DeploymentEvent struct {
-	Message string `json:"message"`
+	Message interface{} `json:"message"`
 }

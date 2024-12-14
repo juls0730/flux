@@ -9,9 +9,11 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.24
 )
 
+require go.uber.org/multierr v1.10.0 // indirect
+
 require (
 	github.com/Microsoft/go-winio v0.4.14 // indirect
-	github.com/agnivade/levenshtein v1.2.0 // indirect
+	github.com/agnivade/levenshtein v1.2.0
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/docker/go-connections v0.5.0 // indirect
@@ -35,6 +37,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.32.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.32.0 // indirect
 	go.opentelemetry.io/otel/trace v1.32.0 // indirect
+	go.uber.org/zap v1.27.0
 	golang.org/x/sys v0.27.0 // indirect
 	golang.org/x/term v0.1.0 // indirect
 	golang.org/x/time v0.8.0 // indirect

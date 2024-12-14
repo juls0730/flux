@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 
 	"github.com/juls0730/flux/pkg"
+	"go.uber.org/zap"
 )
 
 var (
@@ -30,14 +30,14 @@ func CreateDeployment(port uint16, appUrl string, db *sql.DB) (*Deployment, erro
 	if deploymentInsertStmt == nil {
 		deploymentInsertStmt, err = db.Prepare("INSERT INTO deployments (url, port) VALUES ($1, $2) RETURNING id, url, port")
 		if err != nil {
-			log.Printf("Failed to prepare statement: %v\n", err)
+			logger.Errorw("Failed to prepare statement", zap.Error(err))
 			return nil, err
 		}
 	}
 
 	err = deploymentInsertStmt.QueryRow(appUrl, port).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
 	if err != nil {
-		log.Printf("Failed to insert deployment: %v\n", err)
+		logger.Errorw("Failed to insert deployment", zap.Error(err))
 		return nil, err
 	}
 
@@ -52,7 +52,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 
 	container, err := deployment.Head.Upgrade(ctx, imageName, projectPath, projectConfig)
 	if err != nil {
-		log.Printf("Failed to upgrade container: %v\n", err)
+		logger.Errorw("Failed to upgrade container", zap.Error(err))
 		return err
 	}
 
@@ -60,20 +60,20 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	deployment.Head = container
 	deployment.Containers = append(deployment.Containers, container)
 
-	log.Printf("Starting container %s...\n", container.ContainerID[:12])
+	logger.Debugw("Starting container", zap.ByteString("container_id", container.ContainerID[:12]))
 	err = container.Start(ctx)
 	if err != nil {
-		log.Printf("Failed to start container: %v\n", err)
+		logger.Errorw("Failed to start container", zap.Error(err))
 		return err
 	}
 
 	if err := container.Wait(ctx, projectConfig.Port); err != nil {
-		log.Printf("Failed to wait for container: %v\n", err)
+		logger.Errorw("Failed to wait for container", zap.Error(err))
 		return err
 	}
 
 	if _, err := Flux.db.Exec("UPDATE deployments SET url = ?, port = ? WHERE id = ?", projectConfig.Url, projectConfig.Port, deployment.ID); err != nil {
-		log.Printf("Failed to update deployment: %v\n", err)
+		logger.Errorw("Failed to update deployment", zap.Error(err))
 		return err
 	}
 
@@ -81,13 +81,13 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	oldProxy := deployment.Proxy
 	deployment.Proxy, err = deployment.NewDeploymentProxy()
 	if err != nil {
-		log.Printf("Failed to create deployment proxy: %v\n", err)
+		logger.Errorw("Failed to create deployment proxy", zap.Error(err))
 		return err
 	}
 
 	tx, err := Flux.db.Begin()
 	if err != nil {
-		log.Printf("Failed to begin transaction: %v\n", err)
+		logger.Errorw("Failed to begin transaction", zap.Error(err))
 		return err
 	}
 
@@ -95,13 +95,13 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	var oldContainers []*Container
 	for _, container := range deployment.Containers {
 		if existingContainers[string(container.ContainerID[:])] {
-			log.Printf("Deleting container from db: %s\n", container.ContainerID[:12])
+			logger.Debugw("Deleting container from db", zap.ByteString("container_id", container.ContainerID[:12]))
 
 			_, err = tx.Exec("DELETE FROM containers WHERE id = ?", container.ID)
 			oldContainers = append(oldContainers, container)
 
 			if err != nil {
-				log.Printf("Failed to delete container: %v\n", err)
+				logger.Errorw("Failed to delete container", zap.Error(err))
 				tx.Rollback()
 				return err
 			}
@@ -113,7 +113,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	}
 
 	if err := tx.Commit(); err != nil {
-		log.Printf("Failed to commit transaction: %v\n", err)
+		logger.Errorw("Failed to commit transaction", zap.Error(err))
 		return err
 	}
 
@@ -123,7 +123,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		for _, container := range oldContainers {
 			err := RemoveDockerContainer(context.Background(), string(container.ContainerID[:]))
 			if err != nil {
-				log.Printf("Failed to remove container: %v\n", err)
+				logger.Errorw("Failed to remove container", zap.Error(err))
 			}
 		}
 	}
@@ -136,14 +136,16 @@ func (d *Deployment) Remove(ctx context.Context) error {
 	for _, container := range d.Containers {
 		err := container.Remove(ctx)
 		if err != nil {
-			log.Printf("Failed to remove container (%s): %v\n", container.ContainerID[:12], err)
+			logger.Errorf("Failed to remove container (%s): %v\n", container.ContainerID[:12], err)
 			return err
 		}
 	}
 
+	Flux.proxy.RemoveDeployment(d)
+
 	_, err := Flux.db.Exec("DELETE FROM deployments WHERE id = ?", d.ID)
 	if err != nil {
-		log.Printf("Failed to delete deployment: %v\n", err)
+		logger.Errorw("Failed to delete deployment", zap.Error(err))
 		return err
 	}
 
@@ -154,7 +156,7 @@ func (d *Deployment) Start(ctx context.Context) error {
 	for _, container := range d.Containers {
 		err := container.Start(ctx)
 		if err != nil {
-			log.Printf("Failed to start container: %v\n", err)
+			logger.Errorf("Failed to start container (%s): %v\n", container.ContainerID[:12], err)
 			return err
 		}
 	}
@@ -171,7 +173,7 @@ func (d *Deployment) Stop(ctx context.Context) error {
 	for _, container := range d.Containers {
 		err := container.Stop(ctx)
 		if err != nil {
-			log.Printf("Failed to start container: %v\n", err)
+			logger.Errorf("Failed to start container (%s): %v\n", container.ContainerID[:12], err)
 			return err
 		}
 	}
@@ -195,7 +197,7 @@ func (d *Deployment) Status(ctx context.Context) (string, error) {
 	for _, container := range d.Containers {
 		containerStatus, err := container.Status(ctx)
 		if err != nil {
-			log.Printf("Failed to get container status: %v\n", err)
+			logger.Errorw("Failed to get container status", zap.Error(err))
 			return "", err
 		}
 

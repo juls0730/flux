@@ -3,13 +3,14 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 type Proxy struct {
@@ -21,11 +22,7 @@ func (p *Proxy) RemoveDeployment(deployment *Deployment) {
 }
 
 func (p *Proxy) AddDeployment(deployment *Deployment) {
-	if deployment.Containers == nil {
-		panic("containers is nil")
-	}
-
-	log.Printf("Adding deployment %s\n", deployment.URL)
+	logger.Debugw("Adding deployment", zap.String("url", deployment.URL))
 	p.deployments.Store(deployment.URL, deployment)
 }
 
@@ -114,7 +111,7 @@ func (dp *DeploymentProxy) GracefulShutdown(oldContainers []*Container) {
 	for _, container := range oldContainers {
 		err := RemoveDockerContainer(context.Background(), string(container.ContainerID[:]))
 		if err != nil {
-			log.Printf("Failed to remove container (%s): %v\n", container.ContainerID[:12], err)
+			logger.Errorw("Failed to remove container", zap.Error(err))
 		}
 	}
 }
