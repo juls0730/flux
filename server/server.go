@@ -63,6 +63,10 @@ func NewFluxServer() *FluxServer {
 		rootDir = "/var/fluxd"
 	}
 
+	if err := os.MkdirAll(rootDir, 0755); err != nil {
+		logger.Fatalw("Failed to create fluxd directory", zap.Error(err))
+	}
+
 	db, err := sql.Open("sqlite3", filepath.Join(rootDir, "fluxd.db"))
 	if err != nil {
 		logger.Fatalw("Failed to open database", zap.Error(err))

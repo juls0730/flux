@@ -58,22 +58,20 @@ cd flux
 zqdgr build:daemon
 sudo mv fluxd /usr/local/bin/
 
-sudo cat <<EOF > /etc/systemd/system/fluxd.service
+cat <<EOF
 [Unit]
 Description=Flux Daemon
 After=network.target
 
 [Service]
 ExecStart=/usr/local/bin/fluxd
-WorkingDirectory=/var/fluxd
-User=fluxuser
-Group=fluxgroup
 Restart=always
-Environment=FLUXD_ROOT_DIR=/var/fluxd
+Environment=GOPATH=/var/fluxd/go
+Environment=HOME=/var/fluxd/home
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOF | sudo tee /etc/systemd/system/fluxd.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now fluxd
