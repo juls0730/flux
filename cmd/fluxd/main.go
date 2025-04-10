@@ -4,7 +4,7 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 
-	"github.com/juls0730/flux/server"
+	"github.com/juls0730/flux/internal/server"
 	"go.uber.org/zap"
 )
 

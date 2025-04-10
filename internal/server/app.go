@@ -18,7 +18,9 @@ type App struct {
 	DeploymentID int64       `json:"deployment_id,omitempty"`
 }
 
-func CreateApp(ctx context.Context, imageName string, projectPath string, projectConfig pkg.ProjectConfig) (*App, error) {
+// Create the initial app row in the database and create and start the deployment. The app is the overarching data
+// structure that contains all of the data for a project
+func CreateApp(ctx context.Context, imageName string, projectPath string, projectConfig *pkg.ProjectConfig) (*App, error) {
 	app := &App{
 		Name: projectConfig.Name,
 	}
@@ -31,16 +33,26 @@ func CreateApp(ctx context.Context, imageName string, projectPath string, projec
 		return nil, err
 	}
 
-	container, err := CreateContainer(ctx, imageName, projectPath, projectConfig, true, deployment)
-	if err != nil || container == nil {
-		return nil, fmt.Errorf("failed to create container: %v", err)
+	for _, container := range projectConfig.Containers {
+		c, err := CreateContainer(ctx, &container, projectConfig.Name, false, deployment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create container: %v", err)
+		}
+
+		c.Start(ctx, true)
 	}
 
-	if appInsertStmt == nil {
-		appInsertStmt, err = Flux.db.Prepare("INSERT INTO apps (name, deployment_id) VALUES ($1, $2) RETURNING id, name, deployment_id")
-		if err != nil {
-			return nil, fmt.Errorf("failed to prepare statement: %v", err)
-		}
+	headContainer := &pkg.Container{
+		Name:        projectConfig.Name,
+		ImageName:   imageName,
+		Volumes:     projectConfig.Volumes,
+		Environment: projectConfig.Environment,
+	}
+
+	// this call does a lot for us, see it's documentation for more info
+	_, err = CreateContainer(ctx, headContainer, projectConfig.Name, true, deployment)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create container: %v", err)
 	}
 
 	// create app in the database
@@ -59,7 +71,7 @@ func CreateApp(ctx context.Context, imageName string, projectPath string, projec
 	return app, nil
 }
 
-func (app *App) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, imageName string, projectPath string) error {
+func (app *App) Upgrade(ctx context.Context, imageName string, projectPath string, projectConfig *pkg.ProjectConfig) error {
 	logger.Debugw("Upgrading deployment", zap.String("name", app.Name))
 
 	// if deploy is not started, start it
@@ -83,6 +95,7 @@ func (app *App) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, im
 	return nil
 }
 
+// delete an app and deployment from the database, and its project files from disk.
 func (app *App) Remove(ctx context.Context) error {
 	Flux.appManager.RemoveApp(app.Name)
 
@@ -131,10 +144,12 @@ func (am *AppManager) GetAllApps() []*App {
 	return apps
 }
 
+// removes an app from the app manager
 func (am *AppManager) RemoveApp(name string) {
 	am.Delete(name)
 }
 
+// add a given app to the app manager
 func (am *AppManager) AddApp(name string, app *App) {
 	if app.Deployment.Containers == nil || app.Deployment.Head == nil || len(app.Deployment.Containers) == 0 {
 		panic("nil containers")
@@ -143,6 +158,7 @@ func (am *AppManager) AddApp(name string, app *App) {
 	am.Store(name, app)
 }
 
+// nukes an app completely
 func (am *AppManager) DeleteApp(name string) error {
 	app := am.GetApp(name)
 	if app == nil {
@@ -159,6 +175,7 @@ func (am *AppManager) DeleteApp(name string) error {
 	return nil
 }
 
+// Scan every app in the database, and create in memory structures if the deployment is already running
 func (am *AppManager) Init() {
 	logger.Info("Initializing deployments")
 
@@ -219,7 +236,7 @@ func (am *AppManager) Init() {
 			defer rows.Close()
 
 			for rows.Next() {
-				var volume Volume
+				volume := new(Volume)
 				rows.Scan(&volume.ID, &volume.VolumeID, &volume.ContainerID, &volume.Mountpoint)
 				container.Volumes = append(container.Volumes, volume)
 			}

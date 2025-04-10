@@ -14,18 +14,22 @@ import (
 )
 
 type Proxy struct {
+	// map[string]*Deployment
 	deployments sync.Map
 }
 
+// Stops forwarding traffic to a deployment
 func (p *Proxy) RemoveDeployment(deployment *Deployment) {
 	p.deployments.Delete(deployment.URL)
 }
 
+// Starts forwarding traffic to a deployment. The deployment must be ready to recieve requests before this is called.
 func (p *Proxy) AddDeployment(deployment *Deployment) {
 	logger.Debugw("Adding deployment", zap.String("url", deployment.URL))
 	p.deployments.Store(deployment.URL, deployment)
 }
 
+// This function is responsible for taking an http request and forwarding it to the correct deployment
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 
@@ -35,6 +39,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// on response from the server, this is decremented
 	atomic.AddInt64(&deployment.(*Deployment).Proxy.activeRequests, 1)
 
 	deployment.(*Deployment).Proxy.proxy.ServeHTTP(w, r)
@@ -47,6 +52,7 @@ type DeploymentProxy struct {
 	activeRequests int64
 }
 
+// Creates a proxy for a given deployment
 func (deployment *Deployment) NewDeploymentProxy() (*DeploymentProxy, error) {
 	if deployment == nil {
 		return nil, fmt.Errorf("deployment is nil")
@@ -68,7 +74,11 @@ func (deployment *Deployment) NewDeploymentProxy() (*DeploymentProxy, error) {
 
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
-			req.URL = containerUrl
+			req.URL = &url.URL{
+				Scheme: containerUrl.Scheme,
+				Host:   containerUrl.Host,
+				Path:   req.URL.Path,
+			}
 			req.Host = containerUrl.Host
 		},
 		Transport: &http.Transport{
@@ -90,6 +100,7 @@ func (deployment *Deployment) NewDeploymentProxy() (*DeploymentProxy, error) {
 	}, nil
 }
 
+// Drains connections from a proxy
 func (dp *DeploymentProxy) GracefulShutdown(oldContainers []*Container) {
 	ctx, cancel := context.WithTimeout(context.Background(), dp.gracePeriod)
 	defer cancel()

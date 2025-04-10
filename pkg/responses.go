@@ -7,6 +7,7 @@ type App struct {
 	DeploymentStatus string `json:"deployment_status,omitempty"`
 }
 
+// TODO: this should be flattened to an int, where 0 = disabled and any other number is the level
 type Compression struct {
 	Enabled bool `json:"enabled"`
 	Level   int  `json:"level,omitempty"`
@@ -14,6 +15,7 @@ type Compression struct {
 
 type Info struct {
 	Compression Compression `json:"compression"`
+	Version     string      `json:"version"`
 }
 
 type DeploymentEvent struct {

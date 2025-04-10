@@ -77,6 +77,11 @@ func NewFluxServer() *FluxServer {
 		logger.Fatalw("Failed to create database schema", zap.Error(err))
 	}
 
+	err = PrepareDBStatements(db)
+	if err != nil {
+		logger.Fatalw("Failed to prepare database statements", zap.Error(err))
+	}
+
 	return &FluxServer{
 		db:           db,
 		proxy:        &Proxy{},
@@ -106,11 +111,11 @@ func NewServer() *FluxServer {
 	config.Level = zap.NewAtomicLevelAt(zapcore.Level(verbosity))
 
 	lameLogger, err := config.Build()
-	logger = lameLogger.Sugar()
-
 	if err != nil {
 		logger.Fatalw("Failed to create logger", zap.Error(err))
 	}
+
+	logger = lameLogger.Sugar()
 
 	Flux = NewFluxServer()
 	Flux.Logger = logger
@@ -152,7 +157,7 @@ func NewServer() *FluxServer {
 		logger.Fatalw("Failed to pull builder image", zap.Error(err))
 	}
 
-	// blocking wait for the iamge to be pulled
+	// blocking until the iamge is pulled
 	io.Copy(io.Discard, events)
 
 	logger.Infow("Successfully pulled builder image", zap.String("image", serverConfig.Builder))
@@ -170,15 +175,17 @@ func NewServer() *FluxServer {
 
 	go func() {
 		logger.Infof("Proxy server starting on http://127.0.0.1:%s", port)
-		if err := http.ListenAndServe(fmt.Sprintf(":%s", port), Flux.proxy); err != nil && err != http.ErrServerClosed {
-			logger.Fatalw("Proxy server error", zap.Error(err))
+		if err := http.ListenAndServe(fmt.Sprintf(":%s", port), Flux.proxy); err != nil {
+			logger.Fatalw("Failed to start proxy server", zap.Error(err))
 		}
 	}()
 
 	return Flux
 }
 
-func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig pkg.ProjectConfig) (string, error) {
+// Handler for uploading a project to the server. We have to upload the entire project since we need to build the
+// project ourselves to work with the buildpacks
+func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig *pkg.ProjectConfig) (string, error) {
 	var err error
 	projectPath := filepath.Join(s.rootDir, "apps", projectConfig.Name)
 	if err = os.MkdirAll(projectPath, 0755); err != nil {
@@ -250,4 +257,26 @@ func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig pkg.ProjectConf
 	}
 
 	return projectPath, nil
+}
+
+// TODO: split each prepare statement into its coresponding module so the statememnts are easier to fine
+func PrepareDBStatements(db *sql.DB) error {
+	var err error
+	appInsertStmt, err = db.Prepare("INSERT INTO apps (name, deployment_id) VALUES ($1, $2) RETURNING id, name, deployment_id")
+	if err != nil {
+		return fmt.Errorf("failed to prepare statement: %v", err)
+	}
+
+	containerInsertStmt, err = db.Prepare("INSERT INTO containers (container_id, head, deployment_id) VALUES (?, ?, ?) RETURNING id, container_id, head, deployment_id")
+	if err != nil {
+		return err
+	}
+
+	deploymentInsertStmt, err = db.Prepare("INSERT INTO deployments (url, port) VALUES ($1, $2) RETURNING id, url, port")
+	if err != nil {
+		logger.Errorw("Failed to prepare statement", zap.Error(err))
+		return err
+	}
+
+	return nil
 }

@@ -2,6 +2,16 @@
 
 Flux is a lightweight self-hosted pseudo-PaaS for hosting Golang web apps with ease. Built on top of [Buildpacks](https://buildpacks.io/) and [Docker](https://docs.docker.com/get-docker/), Flux simplifies the deployment process with a focus on similicity, speed, and reliability.
 
+**Goals**:
+
+- Automatic deployment of Golang web apps, simply run `flux init`, chnage the app name, and run `flux deploy` and you're done!
+- Zero-downtime deployments with blue-green deployments
+- Simple but powerful configuration, flux should be able to handle most use cases, from a micro web app to a fullstack app with databases, caching layers, full text search, etc.
+
+**Limitations**:
+- Theoretically only supports up to 1023 containers (roughly 500 apps assuming 2 containers per app), this is because flux uses the same bridge network for all containers (this could theoretically be increased if flux was smart enough to create new networks once we hit the max, but this is not a priority)
+- Containers are not particularly isolated, if one malicious container wanted to scan all containers, or interact with other containers it tectically shouldnt, it totally just can (todo?)
+
 ## Features
 
 - **Blue-Green Deployments**: Deploy new versions of your app without downtime

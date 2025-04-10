@@ -7,6 +7,7 @@
     "scripts": {
         "build:daemon": "go build -o fluxd cmd/fluxd/main.go",
         "build:cli": "go build -o flux cmd/flux/main.go",
+        "build:all": "go build -o fluxd cmd/fluxd/main.go && go build -o flux cmd/flux/main.go",
         "run:daemon": "go run cmd/fluxd/main.go",
         "run:cli": "go run cmd/flux/main.go"
     },

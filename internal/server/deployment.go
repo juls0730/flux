@@ -22,20 +22,12 @@ type Deployment struct {
 	Port       uint16           `json:"port"`
 }
 
-// Creates a deployment and containers in the database
+// Creates a deployment row in the database, containting the URL the app should be hosted on (it's public hostname)
+// and the port that the web server is listening on
 func CreateDeployment(port uint16, appUrl string, db *sql.DB) (*Deployment, error) {
 	var deployment Deployment
-	var err error
 
-	if deploymentInsertStmt == nil {
-		deploymentInsertStmt, err = db.Prepare("INSERT INTO deployments (url, port) VALUES ($1, $2) RETURNING id, url, port")
-		if err != nil {
-			logger.Errorw("Failed to prepare statement", zap.Error(err))
-			return nil, err
-		}
-	}
-
-	err = deploymentInsertStmt.QueryRow(appUrl, port).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
+	err := deploymentInsertStmt.QueryRow(appUrl, port).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
 	if err != nil {
 		logger.Errorw("Failed to insert deployment", zap.Error(err))
 		return nil, err
@@ -44,12 +36,14 @@ func CreateDeployment(port uint16, appUrl string, db *sql.DB) (*Deployment, erro
 	return &deployment, nil
 }
 
-func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.ProjectConfig, imageName string, projectPath string) error {
+// Takes an existing deployment, and gracefully upgrades the app to a new image
+func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.ProjectConfig, imageName string, projectPath string) error {
 	existingContainers, err := findExistingDockerContainers(ctx, projectConfig.Name)
 	if err != nil {
 		return fmt.Errorf("failed to find existing containers: %v", err)
 	}
 
+	// we only upgrade the head container, in the future we might want to allow upgrading supplemental containers, but this should work just fine for now.
 	container, err := deployment.Head.Upgrade(ctx, imageName, projectPath, projectConfig)
 	if err != nil {
 		logger.Errorw("Failed to upgrade container", zap.Error(err))
@@ -61,7 +55,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	deployment.Containers = append(deployment.Containers, container)
 
 	logger.Debugw("Starting container", zap.ByteString("container_id", container.ContainerID[:12]))
-	err = container.Start(ctx)
+	err = container.Start(ctx, true)
 	if err != nil {
 		logger.Errorw("Failed to start container", zap.Error(err))
 		return err
@@ -77,7 +71,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
-	// Create a new proxy that points to the new head, and replace the old one, but ensure that the old one is gracefully shutdown
+	// Create a new proxy that points to the new head, and replace the old one, but ensure that the old one is gracefully drained of connections
 	oldProxy := deployment.Proxy
 	deployment.Proxy, err = deployment.NewDeploymentProxy()
 	if err != nil {
@@ -93,6 +87,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 
 	var containers []*Container
 	var oldContainers []*Container
+	// delete the old head container from the database, and update the deployment's container list
 	for _, container := range deployment.Containers {
 		if existingContainers[string(container.ContainerID[:])] {
 			logger.Debugw("Deleting container from db", zap.ByteString("container_id", container.ContainerID[:12]))
@@ -117,6 +112,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 		return err
 	}
 
+	// gracefully shutdown the old proxy, or if it doesnt exist, just remove the containers
 	if oldProxy != nil {
 		go oldProxy.GracefulShutdown(oldContainers)
 	} else {
@@ -132,6 +128,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig pkg.Pro
 	return nil
 }
 
+// Remove a deployment and all of it's containers
 func (d *Deployment) Remove(ctx context.Context) error {
 	for _, container := range d.Containers {
 		err := container.Remove(ctx)
@@ -154,7 +151,7 @@ func (d *Deployment) Remove(ctx context.Context) error {
 
 func (d *Deployment) Start(ctx context.Context) error {
 	for _, container := range d.Containers {
-		err := container.Start(ctx)
+		err := container.Start(ctx, false)
 		if err != nil {
 			logger.Errorf("Failed to start container (%s): %v\n", container.ContainerID[:12], err)
 			return err
@@ -184,8 +181,10 @@ func (d *Deployment) Stop(ctx context.Context) error {
 	return nil
 }
 
+// return the status of a deployment, either "running", "failed", "stopped", or "pending", errors if not all
+// containers are in the same state
 func (d *Deployment) Status(ctx context.Context) (string, error) {
-	var status string
+	var status *ContainerStatus
 	if d == nil {
 		return "", fmt.Errorf("deployment is nil")
 	}
@@ -202,17 +201,22 @@ func (d *Deployment) Status(ctx context.Context) (string, error) {
 		}
 
 		// if not all containers are in the same state
-		if status != "" && status != containerStatus {
+		if status != nil && status.Status != containerStatus.Status {
 			return "", fmt.Errorf("malformed deployment")
 		}
 
 		status = containerStatus
 	}
 
-	switch status {
+	switch status.Status {
 	case "running":
 		return "running", nil
 	case "exited":
+		if status.ExitCode != 0 {
+			// non-zero exit code in unix terminology means the program did no complete successfully
+			return "failed", nil
+		}
+
 		return "stopped", nil
 	default:
 		return "pending", nil

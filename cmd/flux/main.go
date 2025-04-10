@@ -13,7 +13,7 @@ import (
 
 	"github.com/agnivade/levenshtein"
 	"github.com/briandowns/spinner"
-	"github.com/juls0730/flux/cmd/flux/handlers"
+	"github.com/juls0730/flux/cmd/flux/commands"
 	"github.com/juls0730/flux/cmd/flux/models"
 	"github.com/juls0730/flux/pkg"
 )
@@ -22,6 +22,8 @@ import (
 var config []byte
 
 var configPath = filepath.Join(os.Getenv("HOME"), "/.config/flux")
+
+var version = pkg.Version
 
 var helpStr = `Usage:
   flux <command>
@@ -179,15 +181,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	if info.Version != version {
+		fmt.Printf("Version mismatch, daemon is running version %s, but you are running version %s\n", info.Version, version)
+		os.Exit(1)
+	}
+
 	cmdHandler := CommandHandler{
 		commands: make(map[string]func(bool, models.Config, pkg.Info, *spinner.Spinner, *models.CustomSpinnerWriter, []string) error),
 	}
 
-	cmdHandler.RegisterCmd("deploy", handlers.DeployCommand)
-	cmdHandler.RegisterCmd("stop", handlers.StopCommand)
-	cmdHandler.RegisterCmd("start", handlers.StartCommand)
-	cmdHandler.RegisterCmd("delete", handlers.DeleteCommand)
-	cmdHandler.RegisterCmd("init", handlers.InitCommand)
+	cmdHandler.RegisterCmd("deploy", commands.DeployCommand)
+	cmdHandler.RegisterCmd("stop", commands.StopCommand)
+	cmdHandler.RegisterCmd("start", commands.StartCommand)
+	cmdHandler.RegisterCmd("delete", commands.DeleteCommand)
+	cmdHandler.RegisterCmd("init", commands.InitCommand)
 
 	err = runCommand(command, args, config, info, cmdHandler, 0)
 	if err != nil {

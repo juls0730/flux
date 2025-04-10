@@ -9,9 +9,12 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 
+	"github.com/joho/godotenv"
 	"github.com/juls0730/flux/pkg"
 	"go.uber.org/zap"
 )
@@ -103,7 +106,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer deployRequest.Config.Close()
 
-	var projectConfig pkg.ProjectConfig
+	projectConfig := new(pkg.ProjectConfig)
 	if err := json.NewDecoder(deployRequest.Config).Decode(&projectConfig); err != nil {
 		logger.Errorw("Failed to decode config", zap.Error(err))
 
@@ -221,12 +224,42 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Streams the each line of the pipe into the eventChannel, this closes the pipe when the function exits
-	var pipeGroup sync.WaitGroup
+	// We need to pre-process EnvFile since docker has no concept of where the file is, or anything like that, so we have to read from it,
+	// and place all of it's content into the environment field so that docker can find it later
+	if projectConfig.EnvFile != "" {
+		envBytes, err := os.Open(filepath.Join(projectPath, projectConfig.EnvFile))
+		if err != nil {
+			logger.Errorw("Failed to open env file", zap.Error(err))
+			eventChannel <- DeploymentEvent{
+				Stage:      "error",
+				Message:    fmt.Sprintf("Failed to open env file: %v", err),
+				StatusCode: http.StatusInternalServerError,
+			}
+			return
+		}
+		defer envBytes.Close()
 
+		envVars, err := godotenv.Parse(envBytes)
+		if err != nil {
+			logger.Errorw("Failed to parse env file", zap.Error(err))
+			eventChannel <- DeploymentEvent{
+				Stage:      "error",
+				Message:    fmt.Sprintf("Failed to parse env file: %v", err),
+				StatusCode: http.StatusInternalServerError,
+			}
+			return
+		}
+
+		for key, value := range envVars {
+			projectConfig.Environment = append(projectConfig.Environment, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+
+	pipeGroup := sync.WaitGroup{}
 	streamPipe := func(pipe io.ReadCloser) {
 		pipeGroup.Add(1)
 		defer pipeGroup.Done()
+		defer pipe.Close()
 
 		scanner := bufio.NewScanner(pipe)
 		for scanner.Scan() {
@@ -252,29 +285,12 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		Message: "Preparing project",
 	}
 
+	reader, writer := io.Pipe()
+
 	prepareCmd := exec.Command("go", "generate")
 	prepareCmd.Dir = projectPath
-	cmdOut, err := prepareCmd.StdoutPipe()
-	if err != nil {
-		logger.Errorw("Failed to get stdout pipe", zap.Error(err))
-		eventChannel <- DeploymentEvent{
-			Stage:      "error",
-			Message:    fmt.Sprintf("Failed to get stdout pipe: %s", err),
-			StatusCode: http.StatusInternalServerError,
-		}
-
-		return
-	}
-	cmdErr, err := prepareCmd.StderrPipe()
-	if err != nil {
-		logger.Errorw("Failed to get stderr pipe", zap.Error(err))
-		eventChannel <- DeploymentEvent{
-			Stage:      "error",
-			Message:    fmt.Sprintf("Failed to get stderr pipe: %s", err),
-			StatusCode: http.StatusInternalServerError,
-		}
-		return
-	}
+	prepareCmd.Stdout = writer
+	prepareCmd.Stderr = writer
 
 	err = prepareCmd.Start()
 	if err != nil {
@@ -288,8 +304,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go streamPipe(cmdOut)
-	go streamPipe(cmdErr)
+	go streamPipe(reader)
 
 	pipeGroup.Wait()
 
@@ -305,37 +320,20 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writer.Close()
+
 	eventChannel <- DeploymentEvent{
 		Stage:   "building",
 		Message: "Building project image",
 	}
 
+	reader, writer = io.Pipe()
 	logger.Debugw("Building image for project", zap.String("name", projectConfig.Name))
 	imageName := fmt.Sprintf("flux_%s-image", projectConfig.Name)
 	buildCmd := exec.Command("pack", "build", imageName, "--builder", s.config.Builder)
 	buildCmd.Dir = projectPath
-	cmdOut, err = buildCmd.StdoutPipe()
-	if err != nil {
-		logger.Errorw("Failed to get stdout pipe", zap.Error(err))
-		eventChannel <- DeploymentEvent{
-			Stage:      "error",
-			Message:    fmt.Sprintf("Failed to get stdout pipe: %s", err),
-			StatusCode: http.StatusInternalServerError,
-		}
-
-		return
-	}
-	cmdErr, err = buildCmd.StderrPipe()
-	if err != nil {
-		logger.Errorw("Failed to get stderr pipe", zap.Error(err))
-		eventChannel <- DeploymentEvent{
-			Stage:      "error",
-			Message:    fmt.Sprintf("Failed to get stderr pipe: %s", err),
-			StatusCode: http.StatusInternalServerError,
-		}
-
-		return
-	}
+	buildCmd.Stdout = writer
+	buildCmd.Stderr = writer
 
 	err = buildCmd.Start()
 	if err != nil {
@@ -349,8 +347,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go streamPipe(cmdOut)
-	go streamPipe(cmdErr)
+	go streamPipe(reader)
 
 	pipeGroup.Wait()
 
@@ -375,28 +372,19 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 
 	if app == nil {
 		app, err = CreateApp(ctx, imageName, projectPath, projectConfig)
-		if err != nil {
-			logger.Errorw("Failed to create app", zap.Error(err))
-			eventChannel <- DeploymentEvent{
-				Stage:      "error",
-				Message:    fmt.Sprintf("Failed to create app: %s", err),
-				StatusCode: http.StatusInternalServerError,
-			}
-
-			return
-		}
 	} else {
-		err = app.Upgrade(ctx, projectConfig, imageName, projectPath)
-		if err != nil {
-			logger.Errorw("Failed to upgrade app", zap.Error(err))
-			eventChannel <- DeploymentEvent{
-				Stage:      "error",
-				Message:    fmt.Sprintf("Failed to upgrade app: %s", err),
-				StatusCode: http.StatusInternalServerError,
-			}
+		err = app.Upgrade(ctx, imageName, projectPath, projectConfig)
+	}
 
-			return
+	if err != nil {
+		logger.Errorw("Failed to deploy app", zap.Error(err))
+		eventChannel <- DeploymentEvent{
+			Stage:      "error",
+			Message:    fmt.Sprintf("Failed to upgrade app: %s", err),
+			StatusCode: http.StatusInternalServerError,
 		}
+
+		return
 	}
 
 	eventChannel <- DeploymentEvent{
@@ -455,7 +443,7 @@ func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if status == "stopped" {
+	if status == "stopped" || status == "failed" {
 		http.Error(w, "App is already stopped", http.StatusBadRequest)
 		return
 	}
@@ -525,5 +513,6 @@ func (s *FluxServer) DaemonInfoHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(pkg.Info{
 		Compression: s.config.Compression,
+		Version:     pkg.Version,
 	})
 }
