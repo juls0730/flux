@@ -98,7 +98,7 @@ func DeleteCommand(ctx models.CommandCtx, args []string) error {
 		return deleteAll(ctx, noConfirm)
 	}
 
-	projectName, err := GetProjectName("delete", args)
+	projectName, err := GetProjectId("delete", args, ctx.Config)
 	if err != nil {
 		return fmt.Errorf("\tfailed to get project name: %v.\n\tSee flux delete --help for more information", err)
 	}
@@ -134,6 +134,11 @@ func DeleteCommand(ctx models.CommandCtx, args []string) error {
 		responseBody = []byte(strings.TrimSuffix(string(responseBody), "\n"))
 
 		return fmt.Errorf("delete failed: %s", responseBody)
+	}
+
+	if len(args) == 0 {
+		// remove the .fluxid file if it exists
+		os.Remove(".fluxid")
 	}
 
 	fmt.Printf("Successfully deleted %s\n", projectName)

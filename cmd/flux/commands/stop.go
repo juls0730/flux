@@ -10,7 +10,7 @@ import (
 )
 
 func StopCommand(ctx models.CommandCtx, args []string) error {
-	projectName, err := GetProjectName("stop", args)
+	projectName, err := GetProjectId("stop", args, ctx.Config)
 	if err != nil {
 		return err
 	}

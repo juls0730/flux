@@ -24,7 +24,7 @@ type Deployment struct {
 
 // Creates a deployment row in the database, containting the URL the app should be hosted on (it's public hostname)
 // and the port that the web server is listening on
-func CreateDeployment(port uint16, appUrl string, db *sql.DB) (*Deployment, error) {
+func (flux *FluxServer) CreateDeployment(port uint16, appUrl string) (*Deployment, error) {
 	var deployment Deployment
 
 	err := deploymentInsertStmt.QueryRow(appUrl, port).Scan(&deployment.ID, &deployment.URL, &deployment.Port)
@@ -38,30 +38,34 @@ func CreateDeployment(port uint16, appUrl string, db *sql.DB) (*Deployment, erro
 
 // Takes an existing deployment, and gracefully upgrades the app to a new image
 func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.ProjectConfig, imageName string, projectPath string) error {
-	existingContainers, err := findExistingDockerContainers(ctx, projectConfig.Name)
-	if err != nil {
-		return fmt.Errorf("failed to find existing containers: %v", err)
-	}
-
 	// we only upgrade the head container, in the future we might want to allow upgrading supplemental containers, but this should work just fine for now.
-	container, err := deployment.Head.Upgrade(ctx, imageName, projectPath, projectConfig)
+	newHeadContainer, err := deployment.Head.Upgrade(ctx, imageName, projectPath, projectConfig.Environment)
 	if err != nil {
 		logger.Errorw("Failed to upgrade container", zap.Error(err))
 		return err
 	}
 
-	// copy(container.ContainerID[:], containerIDString)
-	deployment.Head = container
-	deployment.Containers = append(deployment.Containers, container)
+	oldHeadContainer := deployment.Head
+	Flux.db.Exec("DELETE FROM containers WHERE id = ?", oldHeadContainer.ID)
 
-	logger.Debugw("Starting container", zap.ByteString("container_id", container.ContainerID[:12]))
-	err = container.Start(ctx, true)
+	var containers []*Container
+	for _, container := range deployment.Containers {
+		if !container.Head {
+			containers = append(containers, container)
+		}
+	}
+
+	deployment.Head = newHeadContainer
+	deployment.Containers = append(containers, newHeadContainer)
+
+	logger.Debugw("Starting container", zap.ByteString("container_id", newHeadContainer.ContainerID[:12]))
+	err = newHeadContainer.Start(ctx, true)
 	if err != nil {
 		logger.Errorw("Failed to start container", zap.Error(err))
 		return err
 	}
 
-	if err := container.Wait(ctx, projectConfig.Port); err != nil {
+	if err := newHeadContainer.Wait(ctx, projectConfig.Port); err != nil {
 		logger.Errorw("Failed to wait for container", zap.Error(err))
 		return err
 	}
@@ -79,48 +83,13 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 		return err
 	}
 
-	tx, err := Flux.db.Begin()
-	if err != nil {
-		logger.Errorw("Failed to begin transaction", zap.Error(err))
-		return err
-	}
-
-	var containers []*Container
-	var oldContainers []*Container
-	// delete the old head container from the database, and update the deployment's container list
-	for _, container := range deployment.Containers {
-		if existingContainers[string(container.ContainerID[:])] {
-			logger.Debugw("Deleting container from db", zap.ByteString("container_id", container.ContainerID[:12]))
-
-			_, err = tx.Exec("DELETE FROM containers WHERE id = ?", container.ID)
-			oldContainers = append(oldContainers, container)
-
-			if err != nil {
-				logger.Errorw("Failed to delete container", zap.Error(err))
-				tx.Rollback()
-				return err
-			}
-
-			continue
-		}
-
-		containers = append(containers, container)
-	}
-
-	if err := tx.Commit(); err != nil {
-		logger.Errorw("Failed to commit transaction", zap.Error(err))
-		return err
-	}
-
 	// gracefully shutdown the old proxy, or if it doesnt exist, just remove the containers
 	if oldProxy != nil {
-		go oldProxy.GracefulShutdown(oldContainers)
+		go oldProxy.GracefulShutdown([]*Container{oldHeadContainer})
 	} else {
-		for _, container := range oldContainers {
-			err := RemoveDockerContainer(context.Background(), string(container.ContainerID[:]))
-			if err != nil {
-				logger.Errorw("Failed to remove container", zap.Error(err))
-			}
+		err := RemoveDockerContainer(context.Background(), string(oldHeadContainer.ContainerID[:]))
+		if err != nil {
+			logger.Errorw("Failed to remove container", zap.Error(err))
 		}
 	}
 

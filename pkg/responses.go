@@ -1,10 +1,12 @@
 package pkg
 
+import "github.com/google/uuid"
+
 type App struct {
-	ID               int64  `json:"id,omitempty"`
-	Name             string `json:"name,omitempty"`
-	DeploymentID     int64  `json:"deployment_id,omitempty"`
-	DeploymentStatus string `json:"deployment_status,omitempty"`
+	Id               uuid.UUID `json:"id,omitempty"`
+	Name             string    `json:"name,omitempty"`
+	DeploymentID     int64     `json:"deployment_id,omitempty"`
+	DeploymentStatus string    `json:"deployment_status,omitempty"`
 }
 
 // TODO: this should be flattened to an int, where 0 = disabled and any other number is the level

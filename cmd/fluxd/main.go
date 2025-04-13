@@ -14,10 +14,11 @@ func main() {
 
 	http.HandleFunc("POST /deploy", fluxServer.DeployHandler)
 	http.HandleFunc("DELETE /deployments", fluxServer.DeleteAllDeploymentsHandler)
-	http.HandleFunc("DELETE /deployments/{name}", fluxServer.DeleteDeployHandler)
-	http.HandleFunc("POST /start/{name}", fluxServer.StartDeployHandler)
-	http.HandleFunc("POST /stop/{name}", fluxServer.StopDeployHandler)
+	http.HandleFunc("DELETE /deployments/{id}", fluxServer.DeleteDeployHandler)
+	http.HandleFunc("POST /start/{id}", fluxServer.StartDeployHandler)
+	http.HandleFunc("POST /stop/{id}", fluxServer.StopDeployHandler)
 	http.HandleFunc("GET /apps", fluxServer.ListAppsHandler)
+	http.HandleFunc("GET /apps/by-name/{name}", fluxServer.GetAppByNameHandler)
 	http.HandleFunc("GET /heartbeat", fluxServer.DaemonInfoHandler)
 
 	fluxServer.Logger.Info("Fluxd started on http://127.0.0.1:5647")

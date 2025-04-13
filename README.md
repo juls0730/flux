@@ -4,9 +4,13 @@ Flux is a lightweight self-hosted pseudo-PaaS for hosting Golang web apps with e
 
 **Goals**:
 
-- Automatic deployment of Golang web apps, simply run `flux init`, chnage the app name, and run `flux deploy` and you're done!
+- Automatic deployment of Golang web apps, simply run `flux init`, and run `flux deploy` to deploy your app!
 - Zero-downtime deployments with blue-green deployments
 - Simple but powerful configuration, flux should be able to handle most use cases, from a micro web app to a fullstack app with databases, caching layers, full text search, etc.
+
+**What is flux not?**
+
+- Flux is not meant to be used as a multi-tenant PaaS, it is meant to be used by trusted individuals, while flux will still have security in mind, certain things are not secure. For example, anyone can delete all your apps, so be careful, anyone who has access to your flux server can do a lot of damage.
 
 **Limitations**:
 - Theoretically flux is likely limited by the amount of containers can fit in the bridge network, but I haven't tested this
@@ -102,11 +106,19 @@ Flux daemon looks for a confgiuration file in `/var/fluxd/config.json` but can b
 
 ```json
 {
-  "builder": "paketobuildpacks/builder-jammy-tiny"
+  "builder": "paketobuildpacks/builder-jammy-tiny",
+  "disable_delete_all": false,
+  "compression": {
+    "enabled": false
+  }
 }
 ```
 
 - `builder`: The buildpack builder to use (default: `paketobuildpacks/builder-jammy-tiny`)
+- `disable_delete_all`: Disable the delete all deployments endpoint (default: `false`)
+- `compression`: Compression settings
+  - `enabled`: Enable compression (default: `false`)
+  - `level`: Compression level
 
 #### Daemon Settings
 

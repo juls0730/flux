@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/juls0730/flux/pkg"
 	"go.uber.org/zap"
 )
@@ -30,8 +30,9 @@ type Volume struct {
 
 type Container struct {
 	ID           int64       `json:"id"`
-	Head         bool        `json:"head"` // if the container is the head of the deployment
-	Name         string      `json:"name"`
+	Head         bool        `json:"head"`          // if the container is the head of the deployment
+	FriendlyName string      `json:"friendly_name"` // name used by other containers to reach this container
+	Name         string      `json:"name"`          // name of the container in the docker daemon
 	Deployment   *Deployment `json:"-"`
 	Volumes      []*Volume   `json:"volumes"`
 	ContainerID  [64]byte    `json:"container_id"`
@@ -58,16 +59,14 @@ func CreateDockerVolume(ctx context.Context) (vol *Volume, err error) {
 }
 
 // Creates a container in the docker daemon and returns the descriptor for the container
-func CreateDockerContainer(ctx context.Context, imageName string, projectName string, vols []*Volume, environment []string, hosts []string) (*Container, error) {
+func CreateDockerContainer(ctx context.Context, imageName string, vols []*Volume, environment []string, hosts []string) (*Container, error) {
 	for _, host := range hosts {
 		if host == ":" {
 			return nil, fmt.Errorf("invalid host %s", host)
 		}
 	}
 
-	safeImageName := strings.ReplaceAll(imageName, "/", "_")
-	containerName := fmt.Sprintf("flux_%s-%s-%s", safeImageName, projectName, time.Now().Format("20060102-150405"))
-
+	containerName := fmt.Sprintf("flux-%s", namesgenerator.GetRandomName(0))
 	logger.Debugw("Creating container", zap.String("container_id", containerName))
 	mounts := make([]mount.Mount, len(vols))
 	volumes := make(map[string]struct{}, len(vols))
@@ -86,6 +85,9 @@ func CreateDockerContainer(ctx context.Context, imageName string, projectName st
 		Image:   imageName,
 		Env:     environment,
 		Volumes: volumes,
+		Labels: map[string]string{
+			"managed-by": "flux",
+		},
 	},
 		&container.HostConfig{
 			RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
@@ -104,6 +106,7 @@ func CreateDockerContainer(ctx context.Context, imageName string, projectName st
 	c := &Container{
 		ContainerID: [64]byte([]byte(resp.ID)),
 		Volumes:     vols,
+		Name:        containerName,
 	}
 
 	return c, nil
@@ -113,9 +116,9 @@ func CreateDockerContainer(ctx context.Context, imageName string, projectName st
 // 1. Create the container in the docker daemon
 // 2. Create the volumes for the container
 // 3. Insert the container and volumes into the database
-func CreateContainer(ctx context.Context, container *pkg.Container, projectName string, head bool, deployment *Deployment) (c *Container, err error) {
-	if container.Name == "" {
-		return nil, fmt.Errorf("container name is empty")
+func (flux *FluxServer) CreateContainer(ctx context.Context, container *pkg.Container, head bool, deployment *Deployment, friendlyName string) (c *Container, err error) {
+	if friendlyName == "" {
+		return nil, fmt.Errorf("container friendly name is empty")
 	}
 
 	if container.ImageName == "" {
@@ -166,7 +169,7 @@ func CreateContainer(ctx context.Context, container *pkg.Container, projectName 
 				return nil, err
 			}
 
-			hosts = append(hosts, fmt.Sprintf("%s:%s", container.Name, containerName))
+			hosts = append(hosts, fmt.Sprintf("%s:%s", container.FriendlyName, containerName))
 		}
 	}
 
@@ -182,12 +185,12 @@ func CreateContainer(ctx context.Context, container *pkg.Container, projectName 
 		io.Copy(io.Discard, image)
 	}
 
-	c, err = CreateDockerContainer(ctx, container.ImageName, projectName, volumes, container.Environment, hosts)
+	c, err = CreateDockerContainer(ctx, container.ImageName, volumes, container.Environment, hosts)
 	if err != nil {
 		return nil, err
 	}
 
-	c.Name = container.Name
+	c.FriendlyName = friendlyName
 
 	var containerIDString string
 	err = containerInsertStmt.QueryRow(c.ContainerID[:], head, deployment.ID).Scan(&c.ID, &containerIDString, &c.Head, &c.DeploymentID)
@@ -196,7 +199,7 @@ func CreateContainer(ctx context.Context, container *pkg.Container, projectName 
 	}
 	copy(c.ContainerID[:], containerIDString)
 
-	tx, err := Flux.db.Begin()
+	tx, err := flux.db.Begin()
 	if err != nil {
 		return nil, err
 	}
@@ -231,24 +234,21 @@ func CreateContainer(ctx context.Context, container *pkg.Container, projectName 
 	return c, nil
 }
 
-func (c *Container) Upgrade(ctx context.Context, imageName, projectPath string, projectConfig *pkg.ProjectConfig) (*Container, error) {
+func (c *Container) Upgrade(ctx context.Context, imageName, projectPath string, emvironment []string) (*Container, error) {
 	// Create new container with new image
 	logger.Debugw("Upgrading container", zap.ByteString("container_id", c.ContainerID[:12]))
 	if c.Volumes == nil {
 		return nil, fmt.Errorf("no volumes found for container %s", c.ContainerID[:12])
 	}
 
-	var hosts []string
-	for _, container := range c.Deployment.Containers {
-		containerJSON, err := Flux.dockerClient.ContainerInspect(context.Background(), string(container.ContainerID[:]))
-		if err != nil {
-			return nil, err
-		}
-
-		hosts = containerJSON.HostConfig.ExtraHosts
+	containerJSON, err := Flux.dockerClient.ContainerInspect(context.Background(), string(c.ContainerID[:]))
+	if err != nil {
+		return nil, err
 	}
 
-	newContainer, err := CreateDockerContainer(ctx, imageName, projectConfig.Name, c.Volumes, projectConfig.Environment, hosts)
+	hosts := containerJSON.HostConfig.ExtraHosts
+
+	newContainer, err := CreateDockerContainer(ctx, imageName, c.Volumes, emvironment, hosts)
 	if err != nil {
 		return nil, err
 	}
@@ -294,7 +294,7 @@ func (c *Container) Upgrade(ctx context.Context, imageName, projectPath string, 
 	return newContainer, nil
 }
 
-// initial indicates if the container was just created, because if not, we need to fix the extra hsots since it's not guaranteed that the supplemental containers have the same ip
+// initial indicates if the container was just created, because if not, we need to fix the extra hosts field since it's not guaranteed that the supplemental containers have the same ip
 // as they had when the deployment was previously on
 func (c *Container) Start(ctx context.Context, initial bool) error {
 	if !initial && c.Head {
@@ -331,14 +331,18 @@ func (c *Container) Start(ctx context.Context, initial bool) error {
 				return err
 			}
 
-			hosts = append(hosts, fmt.Sprintf("%s:%s", supplementalContainer.Name, ip))
+			hosts = append(hosts, fmt.Sprintf("%s:%s", supplementalContainer.FriendlyName, ip))
 		}
 
 		// recreate yourself
+		// TODO: pull this out so it stays in sync with CreateDockerContainer
 		resp, err := Flux.dockerClient.ContainerCreate(ctx, &container.Config{
 			Image:   containerJSON.Image,
 			Env:     containerJSON.Config.Env,
 			Volumes: volumes,
+			Labels: map[string]string{
+				"managed-by": "flux",
+			},
 		},
 			&container.HostConfig{
 				RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
@@ -520,22 +524,4 @@ func RemoveVolume(ctx context.Context, volumeID string) error {
 	}
 
 	return nil
-}
-
-func findExistingDockerContainers(ctx context.Context, containerPrefix string) (map[string]bool, error) {
-	containers, err := Flux.dockerClient.ContainerList(ctx, container.ListOptions{
-		All: true,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	var existingContainers map[string]bool = make(map[string]bool)
-	for _, container := range containers {
-		if strings.HasPrefix(container.Names[0], fmt.Sprintf("/%s-", containerPrefix)) {
-			existingContainers[container.ID] = true
-		}
-	}
-
-	return existingContainers, nil
 }

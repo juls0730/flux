@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/briandowns/spinner"
+	"github.com/google/uuid"
 	"github.com/juls0730/flux/cmd/flux/models"
 	"github.com/juls0730/flux/pkg"
 )
@@ -188,7 +189,32 @@ func DeployCommand(ctx models.CommandCtx, args []string) error {
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	configPart, err := writer.CreateFormFile("config", "flux.json")
+
+	if _, err := os.Stat(".fluxid"); err == nil {
+		idPart, err := writer.CreateFormField("id")
+		if err != nil {
+			return fmt.Errorf("failed to create id part: %v", err)
+		}
+
+		idFile, err := os.Open(".fluxid")
+		if err != nil {
+			return fmt.Errorf("failed to open .fluxid: %v", err)
+		}
+		defer idFile.Close()
+
+		var idBytes []byte
+		if idBytes, err = io.ReadAll(idFile); err != nil {
+			return fmt.Errorf("failed to read .fluxid: %v", err)
+		}
+
+		if _, err := uuid.Parse(string(idBytes)); err != nil {
+			return fmt.Errorf(".fluxid does not contain a valid uuid")
+		}
+
+		idPart.Write(idBytes)
+	}
+
+	configPart, err := writer.CreateFormField("config")
 
 	if err != nil {
 		return fmt.Errorf("failed to create config part: %v", err)
@@ -246,7 +272,19 @@ func DeployCommand(ctx models.CommandCtx, args []string) error {
 			switch event {
 			case "complete":
 				loadingSpinner.Stop()
-				fmt.Printf("App %s deployed successfully!\n", data.Message.(map[string]interface{})["name"])
+				fmt.Printf("App %s deployed successfully!\n", data.Message.(map[string]any)["name"])
+				if _, err := os.Stat(".fluxid"); os.IsNotExist(err) {
+					idFile, err := os.Create(".fluxid")
+					if err != nil {
+						return fmt.Errorf("failed to create .fluxid: %v", err)
+					}
+					defer idFile.Close()
+
+					id := data.Message.(map[string]any)["id"].(string)
+					if _, err := idFile.Write([]byte(id)); err != nil {
+						return fmt.Errorf("failed to write .fluxid: %v", err)
+					}
+				}
 				return nil
 			case "cmd_output":
 				customWriter.Printf("... %s\n", data.Message)

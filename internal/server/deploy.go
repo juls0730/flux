@@ -12,8 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 
+	"github.com/docker/docker/pkg/namesgenerator"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	"github.com/juls0730/flux/pkg"
 	"go.uber.org/zap"
@@ -24,55 +27,52 @@ var (
 )
 
 type DeployRequest struct {
-	Config multipart.File `form:"config"`
-	Code   multipart.File `form:"code"`
-}
-
-type DeployResponse struct {
-	App App `json:"app"`
+	Id     uuid.UUID         `form:"id"`
+	Config pkg.ProjectConfig `form:"config"`
+	Code   multipart.File    `form:"code"`
 }
 
 type DeploymentLock struct {
 	mu       sync.Mutex
-	deployed map[string]context.CancelFunc
+	deployed map[uuid.UUID]context.CancelFunc
 }
 
 func NewDeploymentLock() *DeploymentLock {
 	return &DeploymentLock{
-		deployed: make(map[string]context.CancelFunc),
+		deployed: make(map[uuid.UUID]context.CancelFunc),
 	}
 }
 
 // This function will lock a deployment based on an app name so that the same app cannot be deployed twice simultaneously
-func (dt *DeploymentLock) LockDeployment(appName string, ctx context.Context) (context.Context, error) {
+func (dt *DeploymentLock) LockDeployment(appId uuid.UUID, ctx context.Context) (context.Context, error) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
 	// Check if the app is already being deployed
-	if _, exists := dt.deployed[appName]; exists {
-		return nil, fmt.Errorf("app %s is already being deployed", appName)
+	if _, exists := dt.deployed[appId]; exists {
+		return nil, fmt.Errorf("app is already being deployed")
 	}
 
 	// Create a context that can be cancelled
 	ctx, cancel := context.WithCancel(ctx)
 
 	// Store the cancel function
-	dt.deployed[appName] = cancel
+	dt.deployed[appId] = cancel
 
 	return ctx, nil
 }
 
 // This function will unlock a deployment based on an app name so that the same app can be deployed again (you would call this after a deployment has completed)
-func (dt *DeploymentLock) UnlockDeployment(appName string) {
+func (dt *DeploymentLock) UnlockDeployment(appId uuid.UUID) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
 	// Remove the app from deployed tracking
-	if cancel, exists := dt.deployed[appName]; exists {
+	if cancel, exists := dt.deployed[appId]; exists {
 		// Cancel the context
 		cancel()
 		// Remove from map
-		delete(dt.deployed, appName)
+		delete(dt.deployed, appId)
 	}
 }
 
@@ -84,8 +84,8 @@ type DeploymentEvent struct {
 	StatusCode int         `json:"status,omitempty"`
 }
 
-func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
-	if Flux.appManager == nil {
+func (flux *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
+	if flux.appManager == nil {
 		panic("App manager is nil")
 	}
 
@@ -101,22 +101,36 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var deployRequest DeployRequest
-	deployRequest.Config, _, err = r.FormFile("config")
-	if err != nil {
-		http.Error(w, "No flux.json found", http.StatusBadRequest)
-		return
-	}
-	defer deployRequest.Config.Close()
-
 	projectConfig := new(pkg.ProjectConfig)
-	if err := json.NewDecoder(deployRequest.Config).Decode(&projectConfig); err != nil {
+	if err := json.Unmarshal([]byte(r.FormValue("config")), &projectConfig); err != nil {
 		logger.Errorw("Failed to decode config", zap.Error(err))
 
 		http.Error(w, "Invalid flux.json", http.StatusBadRequest)
 		return
 	}
 
-	ctx, err := deploymentLock.LockDeployment(projectConfig.Name, r.Context())
+	deployRequest.Config = *projectConfig
+	idStr := r.FormValue("id")
+
+	if idStr == "" {
+		id, err := uuid.NewRandom()
+		if err != nil {
+			logger.Errorw("Failed to generate uuid", zap.Error(err))
+			http.Error(w, "Failed to generate uuid", http.StatusInternalServerError)
+			return
+		}
+
+		deployRequest.Id = id
+	} else {
+		deployRequest.Id, err = uuid.Parse(idStr)
+		if err != nil {
+			logger.Errorw("Failed to parse uuid", zap.Error(err))
+			http.Error(w, "Failed to parse uuid", http.StatusBadRequest)
+			return
+		}
+	}
+
+	ctx, err := deploymentLock.LockDeployment(deployRequest.Id, r.Context())
 	if err != nil {
 		// This will happen if the app is already being deployed
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -125,7 +139,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		<-ctx.Done()
-		deploymentLock.UnlockDeployment(projectConfig.Name)
+		deploymentLock.UnlockDeployment(deployRequest.Id)
 	}()
 
 	flusher, ok := w.(http.Flusher)
@@ -213,9 +227,9 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logger.Infow("Deploying project", zap.String("name", projectConfig.Name), zap.String("url", projectConfig.Url))
+	logger.Infow("Deploying project", zap.String("name", projectConfig.Name), zap.String("url", projectConfig.Url), zap.String("id", deployRequest.Id.String()))
 
-	projectPath, err := s.UploadAppCode(deployRequest.Code, projectConfig)
+	projectPath, err := flux.UploadAppCode(deployRequest.Code, deployRequest.Id)
 	if err != nil {
 		logger.Infow("Failed to upload code", zap.Error(err))
 		eventChannel <- DeploymentEvent{
@@ -229,7 +243,30 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	// We need to pre-process EnvFile since docker has no concept of where the file is, or anything like that, so we have to read from it,
 	// and place all of it's content into the environment field so that docker can find it later
 	if projectConfig.EnvFile != "" {
-		envBytes, err := os.Open(filepath.Join(projectPath, projectConfig.EnvFile))
+		envPath := filepath.Join(projectPath, projectConfig.EnvFile)
+		// prevent path traversal
+		realEnvPath, err := filepath.EvalSymlinks(envPath)
+		if err != nil {
+			logger.Errorw("Failed to eval symlinks", zap.Error(err))
+			eventChannel <- DeploymentEvent{
+				Stage:      "error",
+				Message:    fmt.Sprintf("Failed to eval symlinks: %s", err),
+				StatusCode: http.StatusInternalServerError,
+			}
+			return
+		}
+
+		if !strings.HasPrefix(realEnvPath, projectPath) {
+			logger.Errorw("Env file is not in project directory", zap.String("env_file", projectConfig.EnvFile))
+			eventChannel <- DeploymentEvent{
+				Stage:      "error",
+				Message:    fmt.Sprintf("Env file is not in project directory: %s", projectConfig.EnvFile),
+				StatusCode: http.StatusBadRequest,
+			}
+			return
+		}
+
+		envBytes, err := os.Open(realEnvPath)
 		if err != nil {
 			logger.Errorw("Failed to open env file", zap.Error(err))
 			eventChannel <- DeploymentEvent{
@@ -281,14 +318,14 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logger.Debugw("Preparing project", zap.String("name", projectConfig.Name))
+	logger.Debugw("Preparing project", zap.String("name", projectConfig.Name), zap.String("id", deployRequest.Id.String()))
 	eventChannel <- DeploymentEvent{
 		Stage:   "preparing",
 		Message: "Preparing project",
 	}
 
+	// redirect stdout and stderr to the event channel
 	reader, writer := io.Pipe()
-
 	prepareCmd := exec.Command("go", "generate")
 	prepareCmd.Dir = projectPath
 	prepareCmd.Stdout = writer
@@ -331,8 +368,8 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 
 	reader, writer = io.Pipe()
 	logger.Debugw("Building image for project", zap.String("name", projectConfig.Name))
-	imageName := fmt.Sprintf("flux_%s-image", projectConfig.Name)
-	buildCmd := exec.Command("pack", "build", imageName, "--builder", s.config.Builder)
+	imageName := fmt.Sprintf("fluxi-%s", namesgenerator.GetRandomName(0))
+	buildCmd := exec.Command("pack", "build", imageName, "--builder", flux.config.Builder)
 	buildCmd.Dir = projectPath
 	buildCmd.Stdout = writer
 	buildCmd.Stderr = writer
@@ -365,7 +402,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	app := Flux.appManager.GetApp(projectConfig.Name)
+	app := flux.appManager.GetApp(deployRequest.Id)
 
 	eventChannel <- DeploymentEvent{
 		Stage:   "creating",
@@ -373,7 +410,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if app == nil {
-		app, err = CreateApp(ctx, imageName, projectPath, projectConfig)
+		app, err = flux.CreateApp(ctx, imageName, projectPath, projectConfig, deployRequest.Id)
 	} else {
 		err = app.Upgrade(ctx, imageName, projectPath, projectConfig)
 	}
@@ -389,18 +426,27 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var extApp pkg.App
+	extApp.Id = app.Id
+	extApp.Name = app.Name
+	extApp.DeploymentID = app.DeploymentID
+
 	eventChannel <- DeploymentEvent{
 		Stage:   "complete",
-		Message: app,
+		Message: extApp,
 	}
 
-	logger.Infow("App deployed successfully", zap.String("name", app.Name))
+	logger.Infow("App deployed successfully", zap.String("id", app.Id.String()))
 }
 
-func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+func (flux *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) {
+	appId, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "Invalid app id", http.StatusBadRequest)
+		return
+	}
 
-	app := Flux.appManager.GetApp(name)
+	app := flux.appManager.GetApp(appId)
 	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
@@ -431,9 +477,13 @@ func (s *FluxServer) StartDeployHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+	appId, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "Invalid app id", http.StatusBadRequest)
+		return
+	}
 
-	app := Flux.appManager.GetApp(name)
+	app := Flux.appManager.GetApp(appId)
 	if app == nil {
 		http.Error(w, "App not found", http.StatusNotFound)
 		return
@@ -460,11 +510,15 @@ func (s *FluxServer) StopDeployHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+	appId, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "Invalid app id", http.StatusBadRequest)
+		return
+	}
 
-	logger.Debugw("Deleting deployment", zap.String("name", name))
+	logger.Debugw("Deleting deployment", zap.String("id", appId.String()))
 
-	err := Flux.appManager.DeleteApp(name)
+	err = Flux.appManager.DeleteApp(appId)
 
 	if err != nil {
 		logger.Errorw("Failed to delete app", zap.Error(err))
@@ -476,8 +530,13 @@ func (s *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
+	if s.config.DisableDeleteAll {
+		http.Error(w, "Delete all is disabled", http.StatusForbidden)
+		return
+	}
+
 	for _, app := range Flux.appManager.GetAllApps() {
-		err := Flux.appManager.DeleteApp(app.Name)
+		err := Flux.appManager.DeleteApp(app.Id)
 		if err != nil {
 			logger.Errorw("Failed to remove app", zap.Error(err))
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -500,7 +559,7 @@ func (s *FluxServer) ListAppsHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		extApp.ID = app.ID
+		extApp.Id = app.Id
 		extApp.Name = app.Name
 		extApp.DeploymentID = app.DeploymentID
 		extApp.DeploymentStatus = deploymentStatus

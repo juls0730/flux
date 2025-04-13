@@ -17,6 +17,7 @@ import (
 
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/google/uuid"
 	"github.com/juls0730/flux/pkg"
 	_ "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
@@ -38,8 +39,9 @@ var (
 )
 
 type FluxServerConfig struct {
-	Builder     string          `json:"builder"`
-	Compression pkg.Compression `json:"compression"`
+	Builder          string          `json:"builder"`
+	DisableDeleteAll bool            `json:"disable_delete_all"`
+	Compression      pkg.Compression `json:"compression"`
 }
 
 type FluxServer struct {
@@ -185,9 +187,9 @@ func NewServer() *FluxServer {
 
 // Handler for uploading a project to the server. We have to upload the entire project since we need to build the
 // project ourselves to work with the buildpacks
-func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig *pkg.ProjectConfig) (string, error) {
+func (s *FluxServer) UploadAppCode(code io.Reader, appId uuid.UUID) (string, error) {
 	var err error
-	projectPath := filepath.Join(s.rootDir, "apps", projectConfig.Name)
+	projectPath := filepath.Join(s.rootDir, "apps", appId.String())
 	if err = os.MkdirAll(projectPath, 0755); err != nil {
 		logger.Errorw("Failed to create project directory", zap.Error(err))
 		return "", err
@@ -259,10 +261,10 @@ func (s *FluxServer) UploadAppCode(code io.Reader, projectConfig *pkg.ProjectCon
 	return projectPath, nil
 }
 
-// TODO: split each prepare statement into its coresponding module so the statememnts are easier to fine
+// TODO: split each prepare statement into its coresponding module so the statememnts are easier to find
 func PrepareDBStatements(db *sql.DB) error {
 	var err error
-	appInsertStmt, err = db.Prepare("INSERT INTO apps (name, deployment_id) VALUES ($1, $2) RETURNING id, name, deployment_id")
+	appInsertStmt, err = db.Prepare("INSERT INTO apps (id, name, deployment_id) VALUES ($1, $2, $3) RETURNING id, name, deployment_id")
 	if err != nil {
 		return fmt.Errorf("failed to prepare statement: %v", err)
 	}

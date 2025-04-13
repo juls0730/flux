@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS deployments (
 );
 
 CREATE TABLE IF NOT EXISTS apps (
-    id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
+    id BLOB PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     deployment_id INTEGER,
     FOREIGN KEY(deployment_id) REFERENCES deployments(id)
