@@ -9,7 +9,7 @@ Flux is a lightweight self-hosted pseudo-PaaS for hosting Golang web apps with e
 - Simple but powerful configuration, flux should be able to handle most use cases, from a micro web app to a fullstack app with databases, caching layers, full text search, etc.
 
 **Limitations**:
-- Theoretically only supports up to 1023 containers (roughly 500 apps assuming 2 containers per app), this is because flux uses the same bridge network for all containers (this could theoretically be increased if flux was smart enough to create new networks once we hit the max, but this is not a priority)
+- Theoretically flux is likely limited by the amount of containers can fit in the bridge network, but I haven't tested this
 - Containers are not particularly isolated, if one malicious container wanted to scan all containers, or interact with other containers it tectically shouldnt, it totally just can (todo?)
 
 ## Features
@@ -77,7 +77,6 @@ After=network.target
 ExecStart=/usr/local/bin/fluxd
 Restart=always
 Environment=GOPATH=/var/fluxd/go
-Environment=HOME=/var/fluxd/home
 
 [Install]
 WantedBy=multi-user.target
@@ -150,18 +149,33 @@ flux.json is the configuration file in the root of your proejct that defines dep
   "name": "my-app",
   "url": "myapp.example.com",
   "port": 8080,
+  "containers": [
+    {
+        "name": "redis",
+        "image": "redis:latest",
+        "volumes": [
+            {
+                "mountpoint": "/data"
+            }
+        ],
+    }
+  ],
   "env_file": ".env",
   "environment": ["DEBUG=true"]
 }
 ```
 
-#### Configuration Options
+The project config files has the following options:
 
-- `name`: The name of the project
-- `url`: Domain for the application
-- `port`: Web server's listening port
-- `env_file`: Path to environment variable file
-- `environment`: Additional environment variables
+| field | description | required |
+| ----- | ----------- | -------- |
+| `name` | The name of the project | true |
+| `url` | Domain for the application | true |
+| `port` | Web server's listening port | true |
+| `env_file` | Path to environment variable file | false |
+| `environment` | Additional environment variables | false |
+| `containers` | Supplemental containers to run alongside the app | false |
+| `volumes` | Volumes to mount to the app's containers | false |
 
 ## Deployment Notes
 

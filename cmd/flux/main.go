@@ -3,16 +3,14 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/agnivade/levenshtein"
-	"github.com/briandowns/spinner"
 	"github.com/juls0730/flux/cmd/flux/commands"
 	"github.com/juls0730/flux/cmd/flux/models"
 	"github.com/juls0730/flux/pkg"
@@ -29,62 +27,93 @@ var helpStr = `Usage:
   flux <command>
 
 Available Commands:
-  init        Initialize a new project
-  deploy      Deploy a new version of the app
-  stop        Stop a container
-  start       Start a container
-  delete      Delete a container
-  list        List all containers
+%s
 
-Flags:
-  -h, --help   help for flux
+Available Flags:
+  --help, -h: Show this help message
 
-Use "flux <command> --help" for more information about a command.`
+Use "flux <command> --help" for more information about a command.
+`
 
 var maxDistance = 3
 
+type CommandFunc func(models.CommandCtx, []string) error
+
+type Command struct {
+	Help        string
+	HandlerFunc CommandFunc
+}
+
 type CommandHandler struct {
-	commands map[string]func(bool, models.Config, pkg.Info, *spinner.Spinner, *models.CustomSpinnerWriter, []string) error
+	commands map[string]Command
+	aliases  map[string]string
 }
 
-func (h *CommandHandler) RegisterCmd(name string, handler func(bool, models.Config, pkg.Info, *spinner.Spinner, *models.CustomSpinnerWriter, []string) error) {
-	h.commands[name] = handler
+func NewCommandHandler() CommandHandler {
+	return CommandHandler{
+		commands: make(map[string]Command),
+		aliases:  make(map[string]string),
+	}
 }
 
-func runCommand(command string, args []string, config models.Config, info pkg.Info, cmdHandler CommandHandler, try int) error {
-	if try == 2 {
-		return fmt.Errorf("unknown command: %s", command)
+func (h *CommandHandler) RegisterCmd(name string, handler CommandFunc, help string) {
+	coomand := Command{
+		Help:        help,
+		HandlerFunc: handler,
 	}
 
-	seekingHelp := false
-	if len(args) > 0 && (args[len(args)-1] == "--help" || args[len(args)-1] == "-h") {
-		seekingHelp = true
-		args = args[:len(args)-1]
+	h.commands[name] = coomand
+}
+
+func (h *CommandHandler) RegisterAlias(alias string, command string) {
+	h.aliases[alias] = command
+}
+
+// returns the command and whether or not it exists
+func (h *CommandHandler) GetCommand(command string) (Command, bool) {
+	if command, ok := h.aliases[command]; ok {
+		return h.commands[command], true
 	}
 
-	spinnerWriter := models.NewCustomSpinnerWriter()
+	commandStruct, ok := h.commands[command]
+	return commandStruct, ok
+}
 
-	loadingSpinner := spinner.New(spinner.CharSets[14], 100*time.Millisecond, spinner.WithWriter(spinnerWriter))
-	defer func() {
-		if loadingSpinner.Active() {
-			loadingSpinner.Stop()
+var helpPadding = 13
+
+func (h *CommandHandler) GetHelp() {
+	commandsStr := ""
+	for command := range h.commands {
+		curLine := ""
+
+		curLine += command
+		for alias, aliasCommand := range h.aliases {
+			if aliasCommand == command {
+				curLine += fmt.Sprintf(", %s", alias)
+			}
 		}
-	}()
 
-	signalChannel := make(chan os.Signal, 1)
-	signal.Notify(signalChannel, os.Interrupt)
-	go func() {
-		<-signalChannel
-		if loadingSpinner.Active() {
-			loadingSpinner.Stop()
-		}
+		curLine += strings.Repeat(" ", helpPadding-(len(curLine)-2))
+		commandsStr += fmt.Sprintf("  %s  %s\n", curLine, h.commands[command].Help)
+	}
 
-		os.Exit(0)
-	}()
+	fmt.Printf(helpStr, strings.TrimRight(commandsStr, "\n"))
+}
 
-	handler, ok := cmdHandler.commands[command]
+func (h *CommandHandler) GetHelpCmd(models.CommandCtx, []string) error {
+	h.GetHelp()
+	return nil
+}
+
+func runCommand(command string, args []string, config models.Config, info pkg.Info, cmdHandler CommandHandler) error {
+	commandCtx := models.CommandCtx{
+		Config: config,
+		Info:   info,
+	}
+
+	commandStruct, ok := cmdHandler.commands[command]
 	if ok {
-		return handler(seekingHelp, config, info, loadingSpinner, spinnerWriter, args)
+		return commandStruct.HandlerFunc(commandCtx, args)
 	}
 
 	// diff the command against the list of commands and if we find a command that is more than 80% similar, ask if that's what the user meant
@@ -108,7 +137,8 @@ func runCommand(command string, args []string, config models.Config, info pkg.In
 	}
 
 	var response string
-	fmt.Printf("No command found with the name '%s'. Did you mean '%s'?\n", command, closestMatch.name)
+	// new line ommitted because it will be produced when the user presses enter to submit their response
+	fmt.Printf("No command found with the name '%s'. Did you mean '%s'? (y/N)", command, closestMatch.name)
 	fmt.Scanln(&response)
 
 	if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
@@ -117,18 +147,34 @@ func runCommand(command string, args []string, config models.Config, info pkg.In
 		return nil
 	}
 
-	return runCommand(command, args, config, info, cmdHandler, try+1)
+	// re-run command after accepting the suggestion
+	return runCommand(command, args, config, info, cmdHandler)
 }
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println(helpStr)
+	cmdHandler := NewCommandHandler()
+
+	cmdHandler.RegisterCmd("init", commands.InitCommand, "Initialize a new project")
+	cmdHandler.RegisterCmd("deploy", commands.DeployCommand, "Deploy a new version of the app")
+	cmdHandler.RegisterCmd("start", commands.StartCommand, "Start the app")
+	cmdHandler.RegisterCmd("stop", commands.StopCommand, "Stop the app")
+	cmdHandler.RegisterCmd("list", commands.ListCommand, "List all the apps")
+	cmdHandler.RegisterCmd("delete", commands.DeleteCommand, "Delete the app")
+
+	fs := flag.NewFlagSet("flux", flag.ExitOnError)
+	fs.Usage = func() {
+		cmdHandler.GetHelp()
+	}
+
+	err := fs.Parse(os.Args[1:])
+	if err != nil {
+		fmt.Println(err)
 		os.Exit(1)
 	}
 
-	if os.Args[1] == "--help" || os.Args[1] == "-h" {
-		fmt.Println(helpStr)
-		os.Exit(0)
+	if len(os.Args) < 2 {
+		cmdHandler.GetHelp()
+		os.Exit(1)
 	}
 
 	if _, err := os.Stat(filepath.Join(configPath, "config.json")); err != nil {
@@ -154,9 +200,6 @@ func main() {
 		fmt.Printf("Failed to parse config file: %v\n", err)
 		os.Exit(1)
 	}
-
-	command := os.Args[1]
-	args := os.Args[2:]
 
 	resp, err := http.Get(config.DeamonURL + "/heartbeat")
 	if err != nil {
@@ -186,19 +229,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	cmdHandler := CommandHandler{
-		commands: make(map[string]func(bool, models.Config, pkg.Info, *spinner.Spinner, *models.CustomSpinnerWriter, []string) error),
-	}
-
-	cmdHandler.RegisterCmd("deploy", commands.DeployCommand)
-	cmdHandler.RegisterCmd("stop", commands.StopCommand)
-	cmdHandler.RegisterCmd("start", commands.StartCommand)
-	cmdHandler.RegisterCmd("delete", commands.DeleteCommand)
-	cmdHandler.RegisterCmd("init", commands.InitCommand)
-
-	err = runCommand(command, args, config, info, cmdHandler, 0)
+	err = runCommand(os.Args[1], fs.Args()[1:], config, info, cmdHandler)
 	if err != nil {
-		fmt.Printf("%v\n", err)
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 }

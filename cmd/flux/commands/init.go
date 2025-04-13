@@ -7,22 +7,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/briandowns/spinner"
 	"github.com/juls0730/flux/cmd/flux/models"
 	"github.com/juls0730/flux/pkg"
 )
 
-func InitCommand(seekingHelp bool, config models.Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *models.CustomSpinnerWriter, args []string) error {
-	if seekingHelp {
-		fmt.Println(`Usage:
-		  flux init [project-name]
-		  
-		Options:
-		  project-name: The name of the project to initialize
-		  
-		Flux will initialize a new project in the current directory or the specified project.`)
-		return nil
-	}
+func InitCommand(ctx models.CommandCtx, args []string) error {
+	// if seekingHelp {
+	// 	fmt.Println(`Usage:
+	// 	  flux init [project-name]
+
+	// 	Options:
+	// 	  project-name: The name of the project to initialize
+
+	// 	Flux will initialize a new project in the current directory or the specified project.`)
+	// 	return nil
+	// }
 
 	var projectConfig pkg.ProjectConfig
 

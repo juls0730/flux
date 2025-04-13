@@ -13,7 +13,7 @@ func GetProjectName(command string, args []string) (string, error) {
 
 	if len(args) == 0 {
 		if _, err := os.Stat("flux.json"); err != nil {
-			return "", fmt.Errorf("usage: flux %[1]s <app name>, or run flux %[1]s in the project directory", command)
+			return "", fmt.Errorf("the current directory is not a flux project, please run flux %[1]s in the project directory", command)
 		}
 
 		fluxConfigFile, err := os.Open("flux.json")

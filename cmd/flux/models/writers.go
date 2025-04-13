@@ -44,11 +44,14 @@ func NewCustomStdout(spinner *CustomSpinnerWriter) *CustomStdout {
 	}
 }
 
+// We have this custom writer because we want to have a spinner at the bottom of the terminal, but we dont want to have
+// it interfere with the output of the command
 func (w *CustomStdout) Write(p []byte) (n int, err error) {
 	w.lock.Lock()
 	defer w.lock.Unlock()
 
-	n, err = os.Stdout.Write([]byte(fmt.Sprintf("\033[2K\r%s", p)))
+	// clear line and carriage return
+	n, err = os.Stdout.Write(fmt.Appendf(nil, "\033[2K\r%s", p))
 	if err != nil {
 		return n, err
 	}

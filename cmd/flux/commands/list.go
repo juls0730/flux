@@ -7,21 +7,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/briandowns/spinner"
 	"github.com/juls0730/flux/cmd/flux/models"
 	"github.com/juls0730/flux/pkg"
 )
 
-func ListCommand(seekingHelp bool, config models.Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *models.CustomSpinnerWriter, args []string) error {
-	if seekingHelp {
-		fmt.Println(`Usage:
-		  flux list
-
-		Flux will list all the apps in the daemon.`)
-		return nil
-	}
-
-	resp, err := http.Get(config.DeamonURL + "/apps")
+func ListCommand(ctx models.CommandCtx, args []string) error {
+	resp, err := http.Get(ctx.Config.DeamonURL + "/apps")
 	if err != nil {
 		return fmt.Errorf("failed to get apps: %v", err)
 	}

@@ -1,4 +1,3 @@
-
 package commands
 
 import (
@@ -12,9 +11,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/briandowns/spinner"
 	"github.com/juls0730/flux/cmd/flux/models"
@@ -152,23 +153,35 @@ func compressDirectory(compression pkg.Compression) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func DeployCommand(seekingHelp bool, config models.Config, info pkg.Info, loadingSpinner *spinner.Spinner, spinnerWriter *models.CustomSpinnerWriter, args []string) error {
-	if seekingHelp {
-		fmt.Println(`Usage:
-		  flux deploy
-		  
-		Flux will deploy the app in the current directory, and start routing traffic to it.`)
-		return nil
-	}
-
+func DeployCommand(ctx models.CommandCtx, args []string) error {
 	if _, err := os.Stat("flux.json"); err != nil {
 		return fmt.Errorf("no flux.json found, please run flux init first")
 	}
 
+	spinnerWriter := models.NewCustomSpinnerWriter()
+
+	loadingSpinner := spinner.New(spinner.CharSets[14], 100*time.Millisecond, spinner.WithWriter(spinnerWriter))
+	defer func() {
+		if loadingSpinner.Active() {
+			loadingSpinner.Stop()
+		}
+	}()
+
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, os.Interrupt)
+	go func() {
+		<-signalChannel
+		if loadingSpinner.Active() {
+			loadingSpinner.Stop()
+		}
+
+		os.Exit(0)
+	}()
+
 	loadingSpinner.Suffix = " Deploying"
 	loadingSpinner.Start()
 
-	buf, err := compressDirectory(info.Compression)
+	buf, err := compressDirectory(ctx.Info.Compression)
 	if err != nil {
 		return fmt.Errorf("failed to compress directory: %v", err)
 	}
@@ -204,7 +217,7 @@ func DeployCommand(seekingHelp bool, config models.Config, info pkg.Info, loadin
 		return fmt.Errorf("failed to close writer: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", config.DeamonURL+"/deploy", body)
+	req, err := http.NewRequest("POST", ctx.Config.DeamonURL+"/deploy", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 
 	if err != nil {

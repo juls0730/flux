@@ -43,7 +43,8 @@ func NewDeploymentLock() *DeploymentLock {
 	}
 }
 
-func (dt *DeploymentLock) StartDeployment(appName string, ctx context.Context) (context.Context, error) {
+// This function will lock a deployment based on an app name so that the same app cannot be deployed twice simultaneously
+func (dt *DeploymentLock) LockDeployment(appName string, ctx context.Context) (context.Context, error) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
@@ -61,7 +62,8 @@ func (dt *DeploymentLock) StartDeployment(appName string, ctx context.Context) (
 	return ctx, nil
 }
 
-func (dt *DeploymentLock) CompleteDeployment(appName string) {
+// This function will unlock a deployment based on an app name so that the same app can be deployed again (you would call this after a deployment has completed)
+func (dt *DeploymentLock) UnlockDeployment(appName string) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
@@ -114,7 +116,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, err := deploymentLock.StartDeployment(projectConfig.Name, r.Context())
+	ctx, err := deploymentLock.LockDeployment(projectConfig.Name, r.Context())
 	if err != nil {
 		// This will happen if the app is already being deployed
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -123,7 +125,7 @@ func (s *FluxServer) DeployHandler(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		<-ctx.Done()
-		deploymentLock.CompleteDeployment(projectConfig.Name)
+		deploymentLock.UnlockDeployment(projectConfig.Name)
 	}()
 
 	flusher, ok := w.(http.Flusher)
