@@ -27,3 +27,15 @@ type ProjectConfig struct {
 	// config for supplemental containersm
 	Containers []Container `json:"containers,omitempty"`
 }
+
+type DaemonConfig struct {
+	Builder          string `json:"builder"`
+	DisableDeleteAll bool   `json:"disable_delete_all"`
+	CompressionLevel int    `json:"compression_level"`
+	DaemonHost       string `json:"host"`       // default is 0.0.0.0:5647
+	ProxyHost        string `json:"proxy_host"` // default is 0.0.0.0:7465
+}
+
+type CLIConfig struct {
+	DaemonURL string `json:"daemon_url,omitempty"`
+}

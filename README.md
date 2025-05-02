@@ -1,6 +1,6 @@
 # Flux
 
-Flux is a lightweight self-hosted pseudo-PaaS for hosting Golang web apps with ease. Built on top of [Buildpacks](https://buildpacks.io/) and [Docker](https://docs.docker.com/get-docker/), Flux simplifies the deployment process with a focus on similicity, speed, and reliability.
+Flux is a lightweight self-hosted micro-PaaS for hosting Golang web apps with ease. Built on top of [Buildpacks](https://buildpacks.io/) and [Docker](https://docs.docker.com/get-docker/), Flux simplifies the deployment process with a focus on similicity, speed, and reliability.
 
 **Goals**:
 

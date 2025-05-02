@@ -5,14 +5,12 @@ go 1.23.3
 require (
 	github.com/briandowns/spinner v1.23.1
 	github.com/docker/docker v27.3.1+incompatible
+	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-sqlite3 v1.14.24
 )
 
-require (
-	github.com/google/uuid v1.6.0 // indirect
-	go.uber.org/multierr v1.10.0 // indirect
-)
+require go.uber.org/multierr v1.10.0 // indirect
 
 require (
 	github.com/Microsoft/go-winio v0.4.14 // indirect
@@ -27,7 +25,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/mattn/go-colorable v0.1.2 // indirect
-	github.com/mattn/go-isatty v0.0.8 // indirect
+	github.com/mattn/go-isatty v0.0.20
 	github.com/moby/docker-image-spec v1.3.1 // indirect
 	github.com/moby/term v0.5.0 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
