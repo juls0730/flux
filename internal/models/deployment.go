@@ -173,14 +173,8 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 	// copy the old head container since Upgrade updates the container in place
 	oldHeadContainer := *deployment.Head()
 
-	oldDeploymentInternalUrl, err := deployment.GetInternalUrl(dockerClient)
-	if err != nil {
-		logger.Errorw("Failed to get internal url", zap.Error(err))
-		return err
-	}
-
 	// we only upgrade the head container, in the future we might want to allow upgrading supplemental containers, but this should work just fine for now.
-	err = deployment.Head().Upgrade(ctx, imageName, projectConfig.Environment, dockerClient, db, logger)
+	err := deployment.Head().Upgrade(ctx, imageName, projectConfig.Environment, dockerClient, db, logger)
 	if err != nil {
 		logger.Errorw("Failed to upgrade container", zap.Error(err))
 		return err
@@ -207,7 +201,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 	}
 
 	// Create a new proxy that points to the new head, and replace the old one, but ensure that the old one is gracefully drained of connections
-	oldProxy, ok := proxyManager.Load(oldDeploymentInternalUrl.String())
+	oldProxy, ok := proxyManager.Load(deployment.URL)
 
 	newDeploymentInternalUrl, err := deployment.GetInternalUrl(dockerClient)
 	if err != nil {
@@ -225,7 +219,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 	deployment.URL = projectConfig.Url
 
 	// gracefully shutdown the old proxy, or if it doesnt exist, just remove the containers
-	if !ok {
+	if ok {
 		go oldProxy.GracefulShutdown(func() {
 			err := dockerClient.DeleteDockerContainer(context.Background(), oldHeadContainer.ContainerID)
 			if err != nil {

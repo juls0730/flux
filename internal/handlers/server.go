@@ -43,7 +43,7 @@ type FluxServer struct {
 	db *sql.DB
 
 	docker *docker.DockerClient
-	// TODO: implement
+
 	proxy      *proxyManagerService.ProxyManager
 	appManager *appManagerService.AppManager
 
@@ -147,7 +147,10 @@ func NewServer() *FluxServer {
 	flux.proxy = proxyManagerService.NewProxyManager(flux.logger)
 
 	flux.appManager = appManagerService.NewAppManager(flux.db, flux.docker, flux.proxy, flux.logger)
-	flux.appManager.Init()
+	err = flux.appManager.Init()
+	if err != nil {
+		flux.logger.Fatalw("Failed to initialize apps", zap.Error(err))
+	}
 
 	return flux
 }

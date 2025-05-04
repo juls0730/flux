@@ -482,6 +482,14 @@ func (flux *FluxServer) StartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	app.State = "running"
+	_, err = flux.db.ExecContext(r.Context(), "UPDATE apps SET state = ? WHERE id = ?", app.State, app.Id[:])
+	if err != nil {
+		flux.logger.Errorw("Failed to update app state", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	err = app.Deployment.Start(r.Context(), flux.docker)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -529,6 +537,14 @@ func (flux *FluxServer) StopApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	app.State = "stopped"
+	_, err = flux.db.ExecContext(r.Context(), "UPDATE apps SET state = ? WHERE id = ?", app.State, app.Id[:])
+	if err != nil {
+		flux.logger.Errorw("Failed to update app state", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	err = app.Deployment.Stop(r.Context(), flux.docker)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -571,6 +587,8 @@ func (flux *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	flux.proxy.RemoveDeployment(app.Deployment.URL)
 
 	w.WriteHeader(http.StatusOK)
 }

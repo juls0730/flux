@@ -33,7 +33,7 @@ func NewAppManager(db *sql.DB, dockerClient *docker.DockerClient, proxyManager *
 }
 
 func (appManager *AppManager) CreateApp(ctx context.Context, imageName string, projectConfig *pkg.ProjectConfig, id uuid.UUID) (*models.App, error) {
-	app := models.App{
+	app := &models.App{
 		Id: id,
 	}
 	appManager.logger.Debugw("Creating deployment", zap.String("id", app.Id.String()))
@@ -69,22 +69,17 @@ func (appManager *AppManager) CreateApp(ctx context.Context, imageName string, p
 		return nil, fmt.Errorf("failed to create container: %v", err)
 	}
 
-	var appIdBlob []byte
-	err = appManager.db.QueryRow("INSERT INTO apps (id, name, deployment_id) VALUES ($1, $2, $3) RETURNING id, name, deployment_id", app.Id[:], projectConfig.Name, app.Deployment.ID).Scan(&appIdBlob, &app.Name, &app.DeploymentID)
+	err = appManager.db.QueryRowContext(ctx, "INSERT INTO apps (id, name, state, deployment_id) VALUES ($1, $2, $3, $4) RETURNING name, state, deployment_id", app.Id[:], projectConfig.Name, "running", app.Deployment.ID).Scan(&app.Name, &app.State, &app.DeploymentID)
 	if err != nil {
 		appManager.logger.Errorw("Failed to insert app", zap.Error(err))
 		return nil, fmt.Errorf("failed to insert app: %v", err)
 	}
-	app.Id = uuid.Must(uuid.FromBytes(appIdBlob))
 
 	err = app.Deployment.Start(ctx, appManager.dockerClient)
 	if err != nil {
 		appManager.logger.Errorw("Failed to start deployment", zap.Error(err))
 		return nil, fmt.Errorf("failed to start deployment: %v", err)
 	}
-
-	appManager.AddApp(app.Id, app)
-	appPtr := appManager.GetApp(app.Id)
 
 	deploymentInternalUrl, err := app.Deployment.GetInternalUrl(appManager.dockerClient)
 	if err != nil {
@@ -98,9 +93,10 @@ func (appManager *AppManager) CreateApp(ctx context.Context, imageName string, p
 		return nil, fmt.Errorf("failed to create deployment proxy: %v", err)
 	}
 
-	appManager.proxyManager.AddProxy(appPtr.Deployment.URL, newProxy)
+	appManager.AddApp(app.Id, app)
+	appManager.proxyManager.AddProxy(app.Deployment.URL, newProxy)
 
-	return appPtr, nil
+	return app, nil
 }
 
 func (appManager *AppManager) Upgrade(ctx context.Context, appId uuid.UUID, imageName string, projectConfig *pkg.ProjectConfig) error {
@@ -174,13 +170,13 @@ func (am *AppManager) RemoveApp(id uuid.UUID) {
 }
 
 // add a given app to the app manager
-func (am *AppManager) AddApp(id uuid.UUID, app models.App) {
+func (am *AppManager) AddApp(id uuid.UUID, app *models.App) {
 	if app.Deployment == nil || app.Deployment.Containers() == nil || app.Deployment.Head() == nil || len(app.Deployment.Containers()) == 0 || app.Name == "" {
 		panic("invalid app")
 	}
 
 	am.nameIndex.Store(app.Name, id)
-	am.Store(id, &app)
+	am.Store(id, app)
 }
 
 // nukes an app completely
@@ -203,58 +199,52 @@ func (am *AppManager) DeleteApp(id uuid.UUID) error {
 }
 
 // Scan every app in the database, and create in memory structures if the deployment is already running
-func (am *AppManager) Init() {
+func (am *AppManager) Init() error {
 	am.logger.Info("Initializing deployments")
 
 	if am.db == nil {
 		am.logger.Panic("DB is nil")
 	}
 
-	appRows, err := am.db.Query("SELECT id, name, deployment_id FROM apps")
+	appRows, err := am.db.Query("SELECT id, name, state, deployment_id FROM apps")
 	if err != nil {
-		am.logger.Errorw("Failed to get apps", zap.Error(err))
-		return
+		return fmt.Errorf("failed to get apps: %v", err)
 	}
 	defer appRows.Close()
 
-	var apps []models.App
+	var apps []*models.App
 	for appRows.Next() {
-		var app models.App
+		var app *models.App = new(models.App)
 		var appIdBlob []byte
-		if err := appRows.Scan(&appIdBlob, &app.Name, &app.DeploymentID); err != nil {
-			am.logger.Warnw("Failed to scan app", zap.Error(err))
-			return
+		if err := appRows.Scan(&appIdBlob, &app.Name, &app.State, &app.DeploymentID); err != nil {
+			return fmt.Errorf("failed to scan app: %v", err)
 		}
 		app.Id = uuid.Must(uuid.FromBytes(appIdBlob))
 		app.Deployment = models.NewDeployment()
 		if app.Deployment == nil {
-			am.logger.Errorw("Failed to create deployment")
-			return
+			return fmt.Errorf("failed to create deployment")
 		}
 
 		err := am.db.QueryRow("SELECT id, url, port FROM deployments WHERE id = ?", app.DeploymentID).Scan(&app.Deployment.ID, &app.Deployment.URL, &app.Deployment.Port)
 		if err != nil {
-			am.logger.Errorw("Failed to get deployment", zap.Error(err))
-			return
+			return fmt.Errorf("failed to get deployment: %v", err)
 		}
 		am.logger.Debugw("Found deployment", zap.Int64("id", app.Deployment.ID))
 
-		containerRows, err := am.db.Query("SELECT id, container_id, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
+		containerRows, err := am.db.Query("SELECT id, container_id, friendly_name, deployment_id, head FROM containers WHERE deployment_id = ?", app.DeploymentID)
 		if err != nil {
-			am.logger.Warnw("Failed to query containers", zap.Error(err))
-			return
+			return fmt.Errorf("failed to query containers: %v", err)
 		}
 		defer containerRows.Close()
 
 		for containerRows.Next() {
-			var container models.Container
-			containerRows.Scan(&container.ID, &container.ContainerID, &container.DeploymentID, &container.Head)
+			var container *models.Container = new(models.Container)
+			containerRows.Scan(&container.ID, &container.ContainerID, &container.FriendlyName, &container.DeploymentID, &container.Head)
 			container.Deployment = app.Deployment
 
-			volumeRows, err := am.db.Query("SELECT id, volume_id, container_id, mountpoint FROM volumes WHERE container_id = ?", container.ContainerID[:])
+			volumeRows, err := am.db.Query("SELECT id, volume_id, container_id, mountpoint FROM volumes WHERE container_id = ?", container.ID)
 			if err != nil {
-				am.logger.Warnw("Failed to query volumes", zap.Error(err))
-				return
+				return fmt.Errorf("failed to query volumes: %v", err)
 			}
 			defer volumeRows.Close()
 
@@ -264,10 +254,22 @@ func (am *AppManager) Init() {
 				container.Volumes = append(container.Volumes, volume)
 			}
 
-			app.Deployment.AppendContainer(&container)
+			app.Deployment.AppendContainer(container)
 		}
 
-		// TODO: Store state of deployment in database and start it if it's stopped and should be started
+		// align the state of the deployment with the state of the app
+		switch app.State {
+		case "running":
+			err = app.Deployment.Start(context.Background(), am.dockerClient)
+			if err != nil {
+				return fmt.Errorf("failed to start deployment: %v", err)
+			}
+		case "stopped":
+			err = app.Deployment.Stop(context.Background(), am.dockerClient)
+			if err != nil {
+				return fmt.Errorf("failed to stop deployment: %v", err)
+			}
+		}
 
 		apps = append(apps, app)
 	}
@@ -300,4 +302,6 @@ func (am *AppManager) Init() {
 		am.proxyManager.AddProxy(app.Deployment.URL, proxy)
 		am.logger.Debugw("Created proxy", zap.String("id", app.Id.String()))
 	}
+
+	return nil
 }

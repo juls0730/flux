@@ -12,6 +12,7 @@ import (
 type App struct {
 	Id           uuid.UUID   `json:"id,omitempty"`
 	Name         string      `json:"name,omitempty"`
+	State        string      `json:"state,omitempty"`
 	Deployment   *Deployment `json:"-"`
 	DeploymentID int64       `json:"deployment_id,omitempty"`
 }

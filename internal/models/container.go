@@ -13,25 +13,6 @@ import (
 	"go.uber.org/zap"
 )
 
-type Volume struct {
-	ID          int64  `json:"id"`
-	Mountpoint  string `json:"mountpoint"`
-	VolumeID    string `json:"volume_id"`
-	ContainerID string `json:"container_id"`
-}
-
-func (v *Volume) Remove(ctx context.Context, dockerClient *docker.DockerClient, db *sql.DB, logger *zap.SugaredLogger) error {
-	logger.Debugw("Removing volume", zap.String("volume_id", v.VolumeID))
-
-	_, err := db.ExecContext(ctx, "DELETE FROM volumes WHERE volume_id = ?", v.VolumeID)
-	if err != nil {
-		logger.Errorw("Failed to delete volume", zap.Error(err))
-		return err
-	}
-
-	return dockerClient.DeleteDockerVolume(ctx, v.VolumeID)
-}
-
 type Container struct {
 	ID int64 `json:"id"`
 
@@ -67,11 +48,11 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 
 	logger.Debugw("Creating container with image", zap.String("image", imageName))
 
-	var volumes []*docker.DockerVolume
+	var volumes []*Volume
 	// in the head container, we have a default volume where the project is mounted, this is important so that if the project uses sqlite for example,
 	// all the data will not be lost the second the containers turns off.
 	if head {
-		vol, err := dockerClient.CreateDockerVolume(ctx)
+		vol, err := CreateVolume(ctx, "/workspace", dockerClient, logger)
 		if err != nil {
 			logger.Errorw("Failed to create head's workspace volume", zap.Error(err))
 			return nil, err
@@ -83,12 +64,6 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 	}
 
 	for _, containerVolume := range containerVols {
-		vol, err := dockerClient.CreateDockerVolume(ctx)
-		if err != nil {
-			logger.Errorw("Failed to create volume", zap.Error(err))
-			return nil, err
-		}
-
 		if containerVolume.Mountpoint == "" {
 			return nil, fmt.Errorf("mountpoint is empty")
 		}
@@ -97,7 +72,12 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 			return nil, fmt.Errorf("invalid mountpoint")
 		}
 
-		vol.Mountpoint = containerVolume.Mountpoint
+		vol, err := CreateVolume(ctx, containerVolume.Mountpoint, dockerClient, logger)
+		if err != nil {
+			logger.Errorw("Failed to create volume", zap.Error(err))
+			return nil, err
+		}
+
 		volumes = append(volumes, vol)
 	}
 
@@ -132,8 +112,13 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 		io.Copy(io.Discard, image)
 	}
 
+	dockerVols := make([]*docker.DockerVolume, 0)
+	for _, volume := range volumes {
+		dockerVols = append(dockerVols, &volume.DockerVolume)
+	}
+
 	logger.Debugw("Creating container", zap.String("image", imageName))
-	dockerContainer, err := dockerClient.CreateDockerContainer(ctx, imageName, volumes, environment, hosts, nil)
+	dockerContainer, err := dockerClient.CreateDockerContainer(ctx, imageName, dockerVols, environment, hosts, nil)
 	if err != nil {
 		logger.Errorw("Failed to create container", zap.Error(err))
 		return nil, err
@@ -143,9 +128,10 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 		ContainerID:  dockerContainer.ID,
 		Name:         dockerContainer.Name,
 		FriendlyName: friendlyName,
+		Volumes:      volumes,
 	}
 
-	err = db.QueryRow("INSERT INTO containers (container_id, head, deployment_id) VALUES (?, ?, ?) RETURNING id, container_id, head, deployment_id", string(c.ContainerID), head, deployment.ID).Scan(&c.ID, &c.ContainerID, &c.Head, &c.DeploymentID)
+	err = db.QueryRow("INSERT INTO containers (container_id, head, friendly_name, deployment_id) VALUES (?, ?, ?, ?) RETURNING id, container_id, head, deployment_id", string(c.ContainerID), head, friendlyName, deployment.ID).Scan(&c.ID, &c.ContainerID, &c.Head, &c.DeploymentID)
 	if err != nil {
 		logger.Errorw("Failed to insert container", zap.Error(err))
 		return nil, err
@@ -166,7 +152,7 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 
 	for _, vol := range c.Volumes {
 		logger.Debug("Inserting volume", zap.String("volume_id", vol.VolumeID), zap.String("mountpoint", vol.Mountpoint), zap.String("container_id", string(c.ContainerID)))
-		err = volumeInsertStmt.QueryRow(vol.VolumeID, vol.Mountpoint, c.ContainerID).Scan(&vol.ID, &vol.VolumeID, &vol.Mountpoint, &vol.ContainerID)
+		err = volumeInsertStmt.QueryRow(vol.VolumeID, vol.Mountpoint, c.ID).Scan(&vol.ID, &vol.VolumeID, &vol.Mountpoint, &vol.ContainerID)
 		if err != nil {
 			logger.Errorw("Failed to insert volume", zap.Error(err))
 			tx.Rollback()
@@ -215,7 +201,7 @@ func (c *Container) Upgrade(ctx context.Context, imageName string, environment [
 		return err
 	}
 
-	err = db.QueryRow("INSERT INTO containers (container_id, head, deployment_id) VALUES (?, ?, ?) RETURNING id, container_id, head, deployment_id", newDockerContainer.ID, c.Head, c.Deployment.ID).Scan(&c.ID, &c.ContainerID, &c.Head, &c.DeploymentID)
+	err = db.QueryRow("INSERT INTO containers (container_id, head, friendly_name, deployment_id) VALUES (?, ?, ?, ?) RETURNING id, container_id, head, deployment_id", newDockerContainer.ID, c.Head, c.FriendlyName, c.Deployment.ID).Scan(&c.ID, &c.ContainerID, &c.Head, &c.DeploymentID)
 	if err != nil {
 		logger.Errorw("Failed to insert container", zap.Error(err))
 		return err

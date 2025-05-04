@@ -7,12 +7,14 @@ CREATE TABLE IF NOT EXISTS deployments (
 CREATE TABLE IF NOT EXISTS apps (
     id BLOB PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
     deployment_id INTEGER,
     FOREIGN KEY(deployment_id) REFERENCES deployments(id)
 );
 
 CREATE TABLE IF NOT EXISTS containers (
     id INTEGER PRIMARY KEY AUTOINCREMENT UNIQUE,
+    friendly_name TEXT NOT NULL,
     container_id TEXT NOT NULL,
     head BOOLEAN NOT NULL,
     deployment_id INTEGER NOT NULL,

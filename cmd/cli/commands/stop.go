@@ -12,8 +12,11 @@ func StopCommand(ctx CommandCtx, args []string) error {
 		return err
 	}
 
-	util.PutRequest(ctx.Config.DaemonURL+"/app/"+projectName.Id+"/stop", nil)
+	err = util.PutRequest(ctx.Config.DaemonURL+"/app/"+projectName.Id+"/stop", nil)
+	if err != nil {
+		return fmt.Errorf("failed to stop %s: %v", projectName.Name, err)
+	}
 
-	fmt.Printf("Successfully stopped %s\n", projectName)
+	fmt.Printf("Successfully stopped %s\n", projectName.Name)
 	return nil
 }
