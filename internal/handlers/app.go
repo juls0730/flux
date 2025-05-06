@@ -557,6 +557,11 @@ func (flux *FluxServer) StopApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (flux *FluxServer) DeleteAllDeploymentsHandler(w http.ResponseWriter, r *http.Request) {
+	if flux.config.DisableDeleteAll {
+		http.Error(w, "Delete all deployments is disabled", http.StatusForbidden)
+		return
+	}
+
 	apps := flux.appManager.GetAllApps()
 	for _, app := range apps {
 		err := flux.appManager.DeleteApp(app.Id)
@@ -582,13 +587,23 @@ func (flux *FluxServer) DeleteDeployHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	status, err := app.Deployment.Status(r.Context(), flux.docker, flux.logger)
+	if err != nil {
+		flux.logger.Errorw("Failed to get deployment status", zap.Error(err))
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if status != "stopped" {
+		app.Deployment.Stop(r.Context(), flux.docker)
+		flux.proxy.RemoveDeployment(app.Deployment.URL)
+	}
+
 	err = flux.appManager.DeleteApp(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	flux.proxy.RemoveDeployment(app.Deployment.URL)
 
 	w.WriteHeader(http.StatusOK)
 }

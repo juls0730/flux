@@ -7,9 +7,10 @@
     "scripts": {
         "build:daemon": "go build -o fluxd cmd/daemon/main.go",
         "build:cli": "go build -o flux cmd/cli/main.go",
-        "build:all": "go build -o fluxd cmd/daemon/main.go && go build -o flux cmd/cli/main.go",
+        "build:all": "zqdgr build:daemon && zqdgr build:cli",
         "run:daemon": "go run cmd/daemon/main.go",
-        "run:cli": "go run cmd/flux/main.go"
+        "run:cli": "go run cmd/cli/main.go",
+        "test": "./test.sh"
     },
     "pattern": "**/*.go",
     "excluded_dirs": []

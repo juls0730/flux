@@ -1,3 +1,3 @@
 package pkg
 
-const Version = "2025.05.04-00"
+const Version = "2025.05.06-16"

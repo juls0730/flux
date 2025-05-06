@@ -77,7 +77,7 @@ func (d *Deployment) Start(ctx context.Context, dockerClient *docker.DockerClien
 	for _, container := range d.containers {
 		err := dockerClient.StartContainer(ctx, container.ContainerID)
 		if err != nil {
-			return fmt.Errorf("failed to start container (%s): %v", container.ContainerID[:12], err)
+			return fmt.Errorf("failed to start container (%s): %v", container.ContainerID, err)
 		}
 	}
 
@@ -91,7 +91,7 @@ func (d *Deployment) GetInternalUrl(dockerClient *docker.DockerClient) (*url.URL
 	}
 
 	if containerJSON.NetworkSettings.IPAddress == "" {
-		return nil, fmt.Errorf("no IP address found for container %s", d.Head().ContainerID[:12])
+		return nil, fmt.Errorf("no IP address found for container %s", d.Head().ContainerID)
 	}
 
 	containerUrl, err := url.Parse(fmt.Sprintf("http://%s:%d", containerJSON.NetworkSettings.IPAddress, d.Port))
@@ -106,7 +106,7 @@ func (d *Deployment) Stop(ctx context.Context, dockerClient *docker.DockerClient
 	for _, container := range d.containers {
 		err := dockerClient.StopContainer(ctx, container.ContainerID)
 		if err != nil {
-			return fmt.Errorf("failed to stop container (%s): %v", container.ContainerID[:12], err)
+			return fmt.Errorf("failed to stop container (%s): %v", container.ContainerID, err)
 		}
 	}
 	return nil
@@ -141,7 +141,7 @@ func (deployment *Deployment) Status(ctx context.Context, dockerClient *docker.D
 
 		// if the head is running, but the supplemental container is stopped, return "failed"
 		if headStatus.Status == "running" && containerStatus.Status != "running" {
-			logger.Debugw("Supplemental container is not running but head is, returning to failed state", zap.String("container_id", string(container.ContainerID[:12])))
+			logger.Debugw("Supplemental container is not running but head is, returning to failed state", zap.String("container_id", string(container.ContainerID)))
 			for _, supplementalContainer := range deployment.containers {
 				err := dockerClient.StopContainer(ctx, supplementalContainer.ContainerID)
 				if err != nil {
@@ -183,7 +183,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 	db.Exec("DELETE FROM containers WHERE id = ?", oldHeadContainer.ID)
 
 	newHeadContainer := deployment.Head()
-	logger.Debugw("Starting container", zap.String("container_id", string(newHeadContainer.ContainerID[:12])))
+	logger.Debugw("Starting container", zap.String("container_id", string(newHeadContainer.ContainerID)))
 	err = newHeadContainer.Start(ctx, true, db, dockerClient, logger)
 	if err != nil {
 		logger.Errorw("Failed to start container", zap.Error(err))
@@ -221,7 +221,13 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 	// gracefully shutdown the old proxy, or if it doesnt exist, just remove the containers
 	if ok {
 		go oldProxy.GracefulShutdown(func() {
-			err := dockerClient.DeleteDockerContainer(context.Background(), oldHeadContainer.ContainerID)
+			err := dockerClient.StopContainer(context.Background(), oldHeadContainer.ContainerID)
+			if err != nil {
+				logger.Errorw("Failed to stop container", zap.Error(err))
+				return
+			}
+
+			err = dockerClient.DeleteDockerContainer(context.Background(), oldHeadContainer.ContainerID)
 			if err != nil {
 				logger.Errorw("Failed to remove container", zap.Error(err))
 			}

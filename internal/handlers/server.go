@@ -62,7 +62,12 @@ func NewServer() *FluxServer {
 
 	config := zap.NewProductionConfig()
 
-	if os.Getenv("DEBUG") == "true" {
+	debug, err := strconv.ParseBool(os.Getenv("DEBUG"))
+	if err != nil {
+		debug = false
+	}
+
+	if debug {
 		config = zap.NewDevelopmentConfig()
 		verbosity = -1
 	}

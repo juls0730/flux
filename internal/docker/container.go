@@ -152,7 +152,7 @@ func (d *DockerClient) GetContainerStatus(containerID DockerID) (*ContainerStatu
 }
 
 func (d *DockerClient) StopContainer(ctx context.Context, containerID DockerID) error {
-	d.logger.Debugw("Stopping container", zap.String("container_id", string(containerID[:12])))
+	d.logger.Debugw("Stopping container", zap.String("container_id", string(containerID)))
 	return d.client.ContainerStop(ctx, string(containerID), container.StopOptions{})
 }
 

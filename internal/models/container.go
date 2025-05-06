@@ -176,9 +176,9 @@ func CreateContainer(ctx context.Context, imageName string, friendlyName string,
 // Updates Container in place
 func (c *Container) Upgrade(ctx context.Context, imageName string, environment []string, dockerClient *docker.DockerClient, db *sql.DB, logger *zap.SugaredLogger) error {
 	// Create new container with new image
-	logger.Debugw("Upgrading container", zap.String("container_id", string(c.ContainerID[:12])))
+	logger.Debugw("Upgrading container", zap.String("container_id", string(c.ContainerID)))
 	if c.Volumes == nil {
-		return fmt.Errorf("no volumes found for container %s", c.ContainerID[:12])
+		return fmt.Errorf("no volumes found for container %s", c.ContainerID)
 	}
 
 	containerJSON, err := dockerClient.ContainerInspect(context.Background(), c.ContainerID)
@@ -269,7 +269,7 @@ func (c *Container) Remove(ctx context.Context, dockerClient *docker.DockerClien
 
 func (c *Container) Start(ctx context.Context, initial bool, db *sql.DB, dockerClient *docker.DockerClient, logger *zap.SugaredLogger) error {
 	logger.Debugf("Starting container %+v", c)
-	logger.Info("Starting container", zap.String("container_id", string(c.ContainerID)[:12]))
+	logger.Infow("Starting container", zap.String("container_id", string(c.ContainerID)))
 
 	if !initial && c.Head {
 		logger.Debug("Starting and repairing head container")
@@ -330,7 +330,7 @@ func (c *Container) Wait(ctx context.Context, port uint16, dockerClient *docker.
 func (c *Container) GetIp(dockerClient *docker.DockerClient, logger *zap.SugaredLogger) (string, error) {
 	containerJSON, err := dockerClient.ContainerInspect(context.Background(), c.ContainerID)
 	if err != nil {
-		logger.Errorw("Failed to inspect container", zap.Error(err), zap.String("container_id", string(c.ContainerID[:12])))
+		logger.Errorw("Failed to inspect container", zap.Error(err), zap.String("container_id", string(c.ContainerID)))
 		return "", err
 	}
 

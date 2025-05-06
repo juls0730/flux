@@ -35,9 +35,9 @@ Available Commands:
 %s
 
 Available Flags:
-  --help, -h: Show this help message
+  -help, -h: Show this help message
 
-Use "flux <command> --help" for more information about a command.
+Use "flux <command> -help" for more information about a command.
 `
 
 var maxDistance = 3

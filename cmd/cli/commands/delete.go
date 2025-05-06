@@ -82,7 +82,7 @@ func DeleteCommand(ctx CommandCtx, args []string) error {
 
 	project, err := util.GetProject("delete", args, ctx.Config)
 	if err != nil {
-		return fmt.Errorf("\tfailed to get project name: %v.\n\tSee flux delete --help for more information", err)
+		return fmt.Errorf("\tfailed to get project name: %v.\n\tSee flux delete -help for more information", err)
 	}
 
 	// ask for confirmation if not --no-confirm

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -175,9 +176,36 @@ func preprocessEnvFile(envFile string, target *[]string) error {
 	return nil
 }
 
+var deployUsage = `Usage:
+  flux deploy [flags]
+
+Flags:
+  -help, -h: Show this help message
+%s
+
+Flux will deploy or redeploy the app in the current directory.
+`
+
 func DeployCommand(ctx CommandCtx, args []string) error {
 	if _, err := os.Stat("flux.json"); err != nil {
 		return fmt.Errorf("no flux.json found, please run flux init first")
+	}
+
+	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	fs.Usage = func() {
+		var buf bytes.Buffer
+		// Redirect flagset to print to buffer instead of stdout
+		fs.SetOutput(&buf)
+		fs.PrintDefaults()
+
+		fmt.Println(deployUsage, strings.TrimRight(buf.String(), "\n"))
+	}
+
+	quiet := fs.Bool("q", false, "Don't print the deployment logs")
+
+	err := fs.Parse(args)
+	if err != nil {
+		return err
 	}
 
 	spinnerWriter := util.NewCustomSpinnerWriter()
@@ -353,7 +381,10 @@ func DeployCommand(ctx CommandCtx, args []string) error {
 				}
 				return nil
 			case "cmd_output":
-				customWriter.Printf("... %s\n", data.Message)
+				// suppress the command output if the quiet flag is set
+				if quiet == nil || !*quiet {
+					customWriter.Printf("... %s\n", data.Message)
+				}
 			case "error":
 				loadingSpinner.Stop()
 				return fmt.Errorf("deployment failed: %s", data.Message)
