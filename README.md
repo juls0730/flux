@@ -26,7 +26,7 @@ Flux is a lightweight self-hosted micro-PaaS for hosting Golang web apps with ea
 ## Dependencies
 
 - [Go](https://golang.org/dl/)
-- [ZQDGR](https://github.com/juls0730/zqdgr)
+- [ZQDGR](https://github.com/juls0730/zqdgr) (development only)
 - [Buildpacks](https://buildpacks.io/) (daemon only)
 - [Docker](https://docs.docker.com/get-docker/) (daemon only)
 

@@ -3,11 +3,13 @@ package commands
 import (
 	"github.com/juls0730/flux/pkg"
 	"github.com/juls0730/flux/pkg/API"
+	"go.uber.org/zap"
 )
 
 type CommandCtx struct {
 	Config      pkg.CLIConfig
-	Info        API.Info
+	Logger      *zap.SugaredLogger
+	Info        *API.Info
 	Interactive bool
 }
 

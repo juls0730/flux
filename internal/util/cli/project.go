@@ -7,6 +7,7 @@ import (
 
 	"github.com/juls0730/flux/pkg"
 	"github.com/juls0730/flux/pkg/API"
+	"go.uber.org/zap"
 )
 
 type Project struct {
@@ -14,7 +15,7 @@ type Project struct {
 	Name string `json:"name"`
 }
 
-func GetProject(command string, args []string, config pkg.CLIConfig) (*Project, error) {
+func GetProject(command string, args []string, config pkg.CLIConfig, logger *zap.SugaredLogger) (*Project, error) {
 	var projectName string
 
 	// we are in a project directory and the project is deployed
@@ -24,7 +25,7 @@ func GetProject(command string, args []string, config pkg.CLIConfig) (*Project, 
 			return nil, fmt.Errorf("failed to read .fluxid: %v", err)
 		}
 
-		app, err := GetRequest[API.App](config.DaemonURL + "/app/by-id/" + string(id))
+		app, err := GetRequest[API.App](config.DaemonURL+"/app/by-id/"+string(id), logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get app: %v", err)
 		}
@@ -58,7 +59,7 @@ func GetProject(command string, args []string, config pkg.CLIConfig) (*Project, 
 	}
 
 	// we are calling flux with a project name (ie `flux start my-project`)
-	app, err := GetRequest[API.App](config.DaemonURL + "/app/by-name/" + projectName)
+	app, err := GetRequest[API.App](config.DaemonURL+"/app/by-name/"+projectName, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get app: %v", err)
 	}

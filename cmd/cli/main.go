@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/agnivade/levenshtein"
@@ -15,6 +16,8 @@ import (
 	"github.com/juls0730/flux/pkg"
 	"github.com/juls0730/flux/pkg/API"
 	"github.com/mattn/go-isatty"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func isInteractive() bool {
@@ -43,8 +46,9 @@ Use "flux <command> -help" for more information about a command.
 var maxDistance = 3
 
 type Command struct {
-	Help        string
-	HandlerFunc commands.CommandFunc
+	Help            string
+	DaemonConnected bool
+	HandlerFunc     commands.CommandFunc
 }
 
 type CommandHandler struct {
@@ -59,10 +63,11 @@ func NewCommandHandler() CommandHandler {
 	}
 }
 
-func (h *CommandHandler) RegisterCmd(name string, handler commands.CommandFunc, help string) {
+func (h *CommandHandler) RegisterCmd(name string, handler commands.CommandFunc, daemonConnected bool, help string) {
 	coomand := Command{
-		Help:        help,
-		HandlerFunc: handler,
+		Help:            help,
+		DaemonConnected: daemonConnected,
+		HandlerFunc:     handler,
 	}
 
 	h.commands[name] = coomand
@@ -108,51 +113,35 @@ func (h *CommandHandler) GetHelpCmd(commands.CommandCtx, []string) error {
 	return nil
 }
 
-func runCommand(command string, args []string, config pkg.CLIConfig, info API.Info, cmdHandler CommandHandler) error {
-	commandCtx := commands.CommandCtx{
-		Config:      config,
-		Info:        info,
-		Interactive: isInteractive(),
-	}
-
+func runCommand(command string, args []string, config pkg.CLIConfig, cmdHandler CommandHandler, logger *zap.SugaredLogger) error {
 	commandStruct, ok := cmdHandler.commands[command]
-	if ok {
-		return commandStruct.HandlerFunc(commandCtx, args)
+	if !ok {
+		panic("runCommand was passed an invalid command name")
 	}
 
-	// diff the command against the list of commands and if we find a command that is more than 80% similar, ask if that's what the user meant
-	var closestMatch struct {
-		name  string
-		score int
-	}
-	for cmdName := range cmdHandler.commands {
-		distance := levenshtein.ComputeDistance(cmdName, command)
+	var info *API.Info = nil
 
-		if distance <= maxDistance {
-			if closestMatch.name == "" || distance < closestMatch.score {
-				closestMatch.name = cmdName
-				closestMatch.score = distance
-			}
+	if commandStruct.DaemonConnected {
+		info, err := util.GetRequest[API.Info](config.DaemonURL+"/heartbeat", logger)
+		if err != nil {
+			fmt.Printf("Failed to connect to daemon\n")
+			os.Exit(1)
+		}
+
+		if info.Version != version {
+			fmt.Printf("Version mismatch, daemon is running version %s, but you are running version %s\n", info.Version, version)
+			os.Exit(1)
 		}
 	}
 
-	if closestMatch.name == "" {
-		return fmt.Errorf("unknown command: %s", command)
+	commandCtx := commands.CommandCtx{
+		Config:      config,
+		Info:        info,
+		Logger:      logger,
+		Interactive: isInteractive(),
 	}
 
-	var response string
-	// new line ommitted because it will be produced when the user presses enter to submit their response
-	fmt.Printf("No command found with the name '%s'. Did you mean '%s'? (y/N)", command, closestMatch.name)
-	fmt.Scanln(&response)
-
-	if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
-		command = closestMatch.name
-	} else {
-		return nil
-	}
-
-	// re-run command after accepting the suggestion
-	return runCommand(command, args, config, info, cmdHandler)
+	return commandStruct.HandlerFunc(commandCtx, args)
 }
 
 func main() {
@@ -160,21 +149,44 @@ func main() {
 		fmt.Printf("Flux is being run non-interactively\n")
 	}
 
+	zapConfig := zap.NewDevelopmentConfig()
+	verbosity := 0
+
+	debug, err := strconv.ParseBool(os.Getenv("DEBUG"))
+	if err != nil {
+		debug = false
+	}
+
+	if debug {
+		zapConfig = zap.NewDevelopmentConfig()
+		verbosity = -1
+	}
+
+	zapConfig.Level = zap.NewAtomicLevelAt(zapcore.Level(verbosity))
+
+	lameLogger, err := zapConfig.Build()
+	if err != nil {
+		fmt.Printf("Failed to create logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	logger := lameLogger.Sugar()
+
 	cmdHandler := NewCommandHandler()
 
-	cmdHandler.RegisterCmd("init", commands.InitCommand, "Initialize a new project")
-	cmdHandler.RegisterCmd("deploy", commands.DeployCommand, "Deploy a new version of the app")
-	cmdHandler.RegisterCmd("start", commands.StartCommand, "Start the app")
-	cmdHandler.RegisterCmd("stop", commands.StopCommand, "Stop the app")
-	cmdHandler.RegisterCmd("list", commands.ListCommand, "List all the apps")
-	cmdHandler.RegisterCmd("delete", commands.DeleteCommand, "Delete the app")
+	cmdHandler.RegisterCmd("init", commands.InitCommand, false, "Initialize a new project")
+	cmdHandler.RegisterCmd("deploy", commands.DeployCommand, true, "Deploy a new version of the app")
+	cmdHandler.RegisterCmd("start", commands.StartCommand, true, "Start the app")
+	cmdHandler.RegisterCmd("stop", commands.StopCommand, true, "Stop the app")
+	cmdHandler.RegisterCmd("list", commands.ListCommand, true, "List all the apps")
+	cmdHandler.RegisterCmd("delete", commands.DeleteCommand, true, "Delete the app")
 
 	fs := flag.NewFlagSet("flux", flag.ExitOnError)
 	fs.Usage = func() {
 		cmdHandler.GetHelp()
 	}
 
-	err := fs.Parse(os.Args[1:])
+	err = fs.Parse(os.Args[1:])
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
@@ -214,18 +226,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	info, err := util.GetRequest[API.Info](config.DaemonURL + "/heartbeat")
-	if err != nil {
-		fmt.Printf("Failed to connect to daemon\n")
-		os.Exit(1)
+	command := os.Args[1]
+
+	if _, ok := cmdHandler.commands[command]; !ok {
+		var closestMatch struct {
+			name  string
+			score int
+		}
+		for cmdName := range cmdHandler.commands {
+			distance := levenshtein.ComputeDistance(cmdName, command)
+
+			if distance <= maxDistance {
+				if closestMatch.name == "" || distance < closestMatch.score {
+					closestMatch.name = cmdName
+					closestMatch.score = distance
+				}
+			}
+		}
+
+		if closestMatch.name == "" {
+			fmt.Printf("unknown command: %s", command)
+			os.Exit(1)
+		}
+
+		var response string
+		// new line ommitted because it will be produced when the user presses enter to submit their response
+		fmt.Printf("No command found with the name '%s'. Did you mean '%s'? (y/N)", command, closestMatch.name)
+		fmt.Scanln(&response)
+
+		if strings.ToLower(response) == "y" || strings.ToLower(response) == "yes" {
+			command = closestMatch.name
+		} else {
+			os.Exit(0)
+		}
 	}
 
-	if info.Version != version {
-		fmt.Printf("Version mismatch, daemon is running version %s, but you are running version %s\n", info.Version, version)
-		os.Exit(1)
-	}
-
-	err = runCommand(os.Args[1], fs.Args()[1:], config, *info, cmdHandler)
+	err = runCommand(command, fs.Args()[1:], config, cmdHandler, logger)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)

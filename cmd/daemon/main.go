@@ -19,6 +19,7 @@ func main() {
 	http.HandleFunc("GET /app/by-name/{name}", fluxServer.GetAppByName)
 	http.HandleFunc("GET /app/by-id/{id}", fluxServer.GetAppById)
 
+	// a PUT request is the proper type to use since these endpoints are idempotent
 	http.HandleFunc("PUT /app/{id}/start", fluxServer.StartApp)
 	http.HandleFunc("PUT /app/{id}/stop", fluxServer.StopApp)
 

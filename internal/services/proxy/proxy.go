@@ -41,6 +41,7 @@ func (proxyManager *ProxyManager) ListenAndServe(host string) error {
 
 // Stops forwarding traffic to a deployment
 func (proxyManager *ProxyManager) RemoveDeployment(host string) {
+	proxyManager.logger.Debugw("Removing proxy", zap.String("host", host))
 	proxyManager.Delete(host)
 }
 
@@ -65,25 +66,20 @@ func (proxyManager *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Reque
 }
 
 type Proxy struct {
-	forwardingFor  url.URL
-	proxyFunc      *httputil.ReverseProxy
-	gracePeriod    time.Duration
-	activeRequests int64
+	forwardingFor   url.URL
+	proxyFunc       *httputil.ReverseProxy
+	shutdownTimeout time.Duration
+	activeRequests  int64
 }
 
-// type DeploymentProxy struct {
-// 	deployment     *models.Deployment
-// 	proxy          *httputil.ReverseProxy
-// 	gracePeriod    time.Duration
-// 	activeRequests int64
-// }
+const PROXY_SHUTDOWN_TIMEOUT = 30 * time.Second
 
 // Creates a proxy for a given deployment
 func NewDeploymentProxy(forwardingFor url.URL) (*Proxy, error) {
 	proxy := &Proxy{
-		forwardingFor:  forwardingFor,
-		gracePeriod:    time.Second * 30,
-		activeRequests: 0,
+		forwardingFor:   forwardingFor,
+		shutdownTimeout: PROXY_SHUTDOWN_TIMEOUT,
+		activeRequests:  0,
 	}
 
 	proxy.proxyFunc = &httputil.ReverseProxy{
@@ -111,17 +107,22 @@ func NewDeploymentProxy(forwardingFor url.URL) (*Proxy, error) {
 }
 
 // Drains connections from a proxy
-func (p *Proxy) GracefulShutdown(shutdownFunc func()) {
-	ctx, cancel := context.WithTimeout(context.Background(), p.gracePeriod)
+func (p *Proxy) GracefulShutdown(logger *zap.SugaredLogger, shutdownFunc func()) {
+	logger.Debugw("Shutting down proxy", zap.String("host", p.forwardingFor.Host))
+
+	ctx, cancel := context.WithTimeout(context.Background(), p.shutdownTimeout)
 	defer cancel()
 
 	done := false
 	for !done {
 		select {
 		case <-ctx.Done():
+			logger.Debugw("Proxy shutdown timed out", zap.String("host", p.forwardingFor.Host))
+
 			done = true
 		default:
 			if atomic.LoadInt64(&p.activeRequests) == 0 {
+				logger.Debugw("Proxy shutdown completed successfully", zap.String("host", p.forwardingFor.Host))
 				done = true
 			}
 

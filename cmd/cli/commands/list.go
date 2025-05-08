@@ -8,7 +8,7 @@ import (
 )
 
 func ListCommand(ctx CommandCtx, args []string) error {
-	apps, err := util.GetRequest[[]API.App](ctx.Config.DaemonURL + "/apps")
+	apps, err := util.GetRequest[[]API.App](ctx.Config.DaemonURL+"/apps", ctx.Logger)
 	if err != nil {
 		return fmt.Errorf("failed to get apps: %v", err)
 	}

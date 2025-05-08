@@ -190,6 +190,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 		return err
 	}
 
+	logger.Debugw("Waiting for container to start", zap.String("container_id", string(newHeadContainer.ContainerID)))
 	if err := newHeadContainer.Wait(ctx, projectConfig.Port, dockerClient); err != nil {
 		logger.Errorw("Failed to wait for container", zap.Error(err))
 		return err
@@ -220,7 +221,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 
 	// gracefully shutdown the old proxy, or if it doesnt exist, just remove the containers
 	if ok {
-		go oldProxy.GracefulShutdown(func() {
+		go oldProxy.GracefulShutdown(logger, func() {
 			err := dockerClient.StopContainer(context.Background(), oldHeadContainer.ContainerID)
 			if err != nil {
 				logger.Errorw("Failed to stop container", zap.Error(err))

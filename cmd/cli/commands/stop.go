@@ -7,12 +7,12 @@ import (
 )
 
 func StopCommand(ctx CommandCtx, args []string) error {
-	projectName, err := util.GetProject("stop", args, ctx.Config)
+	projectName, err := util.GetProject("stop", args, ctx.Config, ctx.Logger)
 	if err != nil {
 		return err
 	}
 
-	err = util.PutRequest(ctx.Config.DaemonURL+"/app/"+projectName.Id+"/stop", nil)
+	err = util.PutRequest(ctx.Config.DaemonURL+"/app/"+projectName.Id+"/stop", nil, ctx.Logger)
 	if err != nil {
 		return fmt.Errorf("failed to stop %s: %v", projectName.Name, err)
 	}

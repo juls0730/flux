@@ -49,7 +49,7 @@ func deleteAll(ctx CommandCtx, noConfirm *bool) error {
 		}
 	}
 
-	util.DeleteRequest(ctx.Config.DaemonURL + "/deployments")
+	util.DeleteRequest(ctx.Config.DaemonURL+"/deployments", ctx.Logger)
 
 	fmt.Printf("Successfully deleted all projects\n")
 	return nil
@@ -80,7 +80,7 @@ func DeleteCommand(ctx CommandCtx, args []string) error {
 		return deleteAll(ctx, noConfirm)
 	}
 
-	project, err := util.GetProject("delete", args, ctx.Config)
+	project, err := util.GetProject("delete", args, ctx.Config, ctx.Logger)
 	if err != nil {
 		return fmt.Errorf("\tfailed to get project name: %v.\n\tSee flux delete -help for more information", err)
 	}
@@ -101,7 +101,7 @@ func DeleteCommand(ctx CommandCtx, args []string) error {
 		}
 	}
 
-	err = util.DeleteRequest(ctx.Config.DaemonURL + "/app/" + project.Id)
+	err = util.DeleteRequest(ctx.Config.DaemonURL+"/app/"+project.Id, ctx.Logger)
 	if err != nil {
 		return fmt.Errorf("failed to delete project: %v", err)
 	}

@@ -87,9 +87,11 @@ func (d *DockerClient) StartContainer(ctx context.Context, containerID DockerID)
 	return d.client.ContainerStart(ctx, string(containerID), container.StartOptions{})
 }
 
-// blocks until the container returns a 200 status code
+const CONTAINER_START_TIMEOUT = 30 * time.Second
+
+// blocks until the container returns a 200 status code for a max of CONTAINER_START_TIMEOUT (30 seconds)
 func (d *DockerClient) ContainerWait(ctx context.Context, containerID DockerID, port uint16) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, CONTAINER_START_TIMEOUT)
 	defer cancel()
 
 	for {
