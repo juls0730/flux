@@ -9,6 +9,7 @@ import (
 	"github.com/juls0730/flux/internal/docker"
 	proxyManagerService "github.com/juls0730/flux/internal/services/proxy"
 	"github.com/juls0730/flux/pkg"
+	"github.com/juls0730/sentinel"
 	"go.uber.org/zap"
 )
 
@@ -169,7 +170,7 @@ func (deployment *Deployment) Status(ctx context.Context, dockerClient *docker.D
 }
 
 // Takes an existing deployment, and gracefully upgrades the app to a new image
-func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.ProjectConfig, imageName string, dockerClient *docker.DockerClient, proxyManager *proxyManagerService.ProxyManager, db *sql.DB, logger *zap.SugaredLogger) error {
+func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.ProjectConfig, imageName string, dockerClient *docker.DockerClient, proxyManager *sentinel.ProxyManager, db *sql.DB, logger *zap.SugaredLogger) error {
 	// copy the old head container since Upgrade updates the container in place
 	oldHeadContainer := *deployment.Head()
 
@@ -202,14 +203,18 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 	}
 
 	// Create a new proxy that points to the new head, and replace the old one, but ensure that the old one is gracefully drained of connections
-	oldProxy, ok := proxyManager.Load(deployment.URL)
+	var oldProxy *sentinel.Proxy
+	var ok bool = false
+	if value, exists := proxyManager.Load(deployment.URL); exists {
+		oldProxy, ok = value.(*sentinel.Proxy)
+	}
 
 	newDeploymentInternalUrl, err := deployment.GetInternalUrl(dockerClient)
 	if err != nil {
 		logger.Errorw("Failed to get internal url", zap.Error(err))
 		return err
 	}
-	newProxy, err := proxyManagerService.NewDeploymentProxy(*newDeploymentInternalUrl)
+	newProxy, err := sentinel.NewDeploymentProxy(newDeploymentInternalUrl.String(), proxyManagerService.GetTransport)
 	if err != nil {
 		logger.Errorw("Failed to create deployment proxy", zap.Error(err))
 		return err
@@ -221,7 +226,7 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 
 	// gracefully shutdown the old proxy, or if it doesnt exist, just remove the containers
 	if ok {
-		go oldProxy.GracefulShutdown(logger, func() {
+		go oldProxy.GracefulShutdown(func() {
 			err := dockerClient.StopContainer(context.Background(), oldHeadContainer.ContainerID)
 			if err != nil {
 				logger.Errorw("Failed to stop container", zap.Error(err))
@@ -234,7 +239,12 @@ func (deployment *Deployment) Upgrade(ctx context.Context, projectConfig *pkg.Pr
 			}
 		})
 	} else {
-		err := dockerClient.DeleteDockerContainer(context.Background(), oldHeadContainer.ContainerID)
+		err := dockerClient.StopContainer(context.Background(), oldHeadContainer.ContainerID)
+		if err != nil {
+			logger.Errorw("Failed to stop container", zap.Error(err))
+		}
+
+		err = dockerClient.DeleteDockerContainer(context.Background(), oldHeadContainer.ContainerID)
 		if err != nil {
 			logger.Errorw("Failed to remove container", zap.Error(err))
 		}

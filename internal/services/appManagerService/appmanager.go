@@ -11,6 +11,7 @@ import (
 	proxyManagerService "github.com/juls0730/flux/internal/services/proxy"
 	"github.com/juls0730/flux/internal/util"
 	"github.com/juls0730/flux/pkg"
+	"github.com/juls0730/sentinel"
 	"go.uber.org/zap"
 )
 
@@ -18,12 +19,12 @@ type AppManager struct {
 	util.TypedMap[uuid.UUID, *models.App]
 	nameIndex    util.TypedMap[string, uuid.UUID]
 	logger       *zap.SugaredLogger
-	proxyManager *proxyManagerService.ProxyManager
+	proxyManager *sentinel.ProxyManager
 	dockerClient *docker.DockerClient
 	db           *sql.DB
 }
 
-func NewAppManager(db *sql.DB, dockerClient *docker.DockerClient, proxyManager *proxyManagerService.ProxyManager, logger *zap.SugaredLogger) *AppManager {
+func NewAppManager(db *sql.DB, dockerClient *docker.DockerClient, proxyManager *sentinel.ProxyManager, logger *zap.SugaredLogger) *AppManager {
 	return &AppManager{
 		db:           db,
 		dockerClient: dockerClient,
@@ -87,7 +88,7 @@ func (appManager *AppManager) CreateApp(ctx context.Context, imageName string, p
 		return nil, fmt.Errorf("failed to get internal url: %v", err)
 	}
 
-	newProxy, err := proxyManagerService.NewDeploymentProxy(*deploymentInternalUrl)
+	newProxy, err := sentinel.NewDeploymentProxy(deploymentInternalUrl.String(), proxyManagerService.GetTransport)
 	if err != nil {
 		appManager.logger.Errorw("Failed to create deployment proxy", zap.Error(err))
 		return nil, fmt.Errorf("failed to create deployment proxy: %v", err)
@@ -293,7 +294,7 @@ func (am *AppManager) Init() error {
 			continue
 		}
 
-		proxy, err := proxyManagerService.NewDeploymentProxy(*proxyURL)
+		proxy, err := sentinel.NewDeploymentProxy(proxyURL.String(), proxyManagerService.GetTransport)
 		if err != nil {
 			am.logger.Errorw("Failed to create proxy", zap.Error(err))
 			continue

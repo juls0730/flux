@@ -1,6 +1,6 @@
 module github.com/juls0730/flux
 
-go 1.23.3
+go 1.24.2
 
 require (
 	github.com/briandowns/spinner v1.23.1
@@ -10,7 +10,11 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.24
 )
 
-require go.uber.org/multierr v1.10.0 // indirect
+require (
+	github.com/juls0730/sentinel v0.0.0-20250515154110-2e7e6586cacd // indirect
+	go.uber.org/multierr v1.10.0 // indirect
+	golang.org/x/sync v0.14.0 // indirect
+)
 
 require (
 	github.com/Microsoft/go-winio v0.4.14 // indirect

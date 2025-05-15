@@ -41,7 +41,7 @@ func (dt *MutexLock[T]) Unlock(id T) {
 	dt.mu.Lock()
 	defer dt.mu.Unlock()
 
-	// Remove the app from deployed tracking
+	// Remove the object from the map (functionally unlocking it)
 	if cancel, exists := dt.deployed[id]; exists {
 		// Cancel the context
 		cancel()

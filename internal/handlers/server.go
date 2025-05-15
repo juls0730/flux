@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	_ "embed"
 
@@ -19,7 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/juls0730/flux/internal/docker"
 	"github.com/juls0730/flux/internal/services/appManagerService"
-	proxyManagerService "github.com/juls0730/flux/internal/services/proxy"
+	"github.com/juls0730/sentinel"
 
 	"github.com/juls0730/flux/pkg"
 	"github.com/juls0730/flux/pkg/API"
@@ -44,7 +45,7 @@ type FluxServer struct {
 
 	docker *docker.DockerClient
 
-	proxy      *proxyManagerService.ProxyManager
+	proxy      *sentinel.ProxyManager
 	appManager *appManagerService.AppManager
 
 	rootDir string
@@ -149,7 +150,8 @@ func NewServer() *FluxServer {
 	// blocking until the iamge is pulled
 	io.Copy(io.Discard, events)
 
-	flux.proxy = proxyManagerService.NewProxyManager(flux.logger)
+	requestLogger := &RequestLogger{logger: flux.logger}
+	flux.proxy = sentinel.NewProxyManager(requestLogger)
 
 	flux.appManager = appManagerService.NewAppManager(flux.db, flux.docker, flux.proxy, flux.logger)
 	err = flux.appManager.Init()
@@ -167,7 +169,12 @@ func (s *FluxServer) Stop() {
 func (s *FluxServer) ListenAndServe() error {
 	s.logger.Infow("Starting server", zap.String("daemon_host", s.config.DaemonHost), zap.String("proxy_host", s.config.ProxyHost))
 
-	go s.proxy.ListenAndServe(s.config.ProxyHost)
+	go func() {
+		err := s.proxy.ListenAndServe(s.config.ProxyHost)
+		if err != nil {
+			s.logger.Errorw("Failed to start proxy", zap.Error(err))
+		}
+	}()
 	return http.ListenAndServe(s.config.DaemonHost, nil)
 }
 
@@ -252,4 +259,12 @@ func (s *FluxServer) UploadAppCode(code io.Reader, appId uuid.UUID) (string, err
 	}
 
 	return outputPath, nil
+}
+
+type RequestLogger struct {
+	logger *zap.SugaredLogger
+}
+
+func (r *RequestLogger) LogRequest(host string, status int, latency time.Duration, ip, method, path string) {
+	r.logger.Infow("Request", zap.String("host", host), zap.Int("status", status), zap.Duration("latency", latency), zap.String("ip", ip), zap.String("method", method), zap.String("path", path))
 }

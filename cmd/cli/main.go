@@ -122,7 +122,8 @@ func runCommand(command string, args []string, config pkg.CLIConfig, cmdHandler 
 	var info *API.Info = nil
 
 	if commandStruct.DaemonConnected {
-		info, err := util.GetRequest[API.Info](config.DaemonURL+"/heartbeat", logger)
+		var err error
+		info, err = util.GetRequest[API.Info](config.DaemonURL+"/heartbeat", logger)
 		if err != nil {
 			fmt.Printf("Failed to connect to daemon\n")
 			os.Exit(1)

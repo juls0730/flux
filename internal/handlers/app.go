@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 	proxyManagerService "github.com/juls0730/flux/internal/services/proxy"
 	"github.com/juls0730/flux/pkg/API"
+	"github.com/juls0730/sentinel"
 	"go.uber.org/zap"
 )
 
@@ -128,7 +129,7 @@ func (flux *FluxServer) StartApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	newProxy, err := proxyManagerService.NewDeploymentProxy(*deploymentInternalUrl)
+	newProxy, err := sentinel.NewDeploymentProxy(deploymentInternalUrl.String(), proxyManagerService.GetTransport)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
